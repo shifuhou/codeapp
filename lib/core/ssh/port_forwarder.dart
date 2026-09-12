@@ -38,6 +38,11 @@ class PortForwarder extends ChangeNotifier {
   Timer? _timer;
   bool autoForward = true;
   bool _polling = false;
+  bool _disposed = false;
+
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
 
   /// Fired with a remote port that was just auto-forwarded.
   final newForwardEvents = StreamController<ForwardedPort>.broadcast();
@@ -46,7 +51,7 @@ class PortForwarder extends ChangeNotifier {
 
   void setAutoForward(bool v) {
     autoForward = v;
-    notifyListeners();
+    _notify();
   }
 
   void startWatching({Duration every = const Duration(seconds: 4)}) {
@@ -81,13 +86,16 @@ class PortForwarder extends ChangeNotifier {
         }
       }
       _seen.removeWhere((p) => !now.contains(p));
-      notifyListeners();
+      _notify();
     } catch (_) {
       // Connection hiccup; try again next tick.
     } finally {
       _polling = false;
     }
   }
+
+  @visibleForTesting
+  Future<Map<int, DetectedPort>> listListeningPorts() => _listListeningPorts();
 
   /// Reads /proc/net/tcp{,6} which exists on every Linux box (no `ss` or
   /// `netstat` needed). State 0A == LISTEN.
@@ -146,7 +154,7 @@ class PortForwarder extends ChangeNotifier {
     forwards[remotePort] = fp;
     server.listen((socket) async {
       fp.connections++;
-      notifyListeners();
+      _notify();
       try {
         final ch = await conn.client.forwardLocal('127.0.0.1', remotePort);
         unawaited(socket.addStream(ch.stream).catchError((_) {}));
@@ -159,10 +167,10 @@ class PortForwarder extends ChangeNotifier {
           socket.destroy();
         } catch (_) {}
         fp.connections--;
-        notifyListeners();
+        _notify();
       }
     }, onError: (_) {});
-    notifyListeners();
+    _notify();
     return fp;
   }
 
@@ -170,11 +178,12 @@ class PortForwarder extends ChangeNotifier {
     final fp = forwards.remove(remotePort);
     if (fp == null) return;
     await fp.server.close();
-    notifyListeners();
+    _notify();
   }
 
   @override
   void dispose() {
+    _disposed = true;
     stopWatching();
     for (final fp in forwards.values) {
       fp.server.close();

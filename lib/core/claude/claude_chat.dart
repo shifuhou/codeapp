@@ -31,6 +31,11 @@ class ClaudeChat extends ChangeNotifier {
   String? lastError;
   final _stderrBuf = StringBuffer();
 
+  bool _disposed = false;
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
+
   AssistantTextItem? _streamingText;
   final Map<String, ToolCallItem> _toolCalls = {};
 
@@ -43,7 +48,7 @@ class ClaudeChat extends ChangeNotifier {
     _streamingText = null;
     lastError = null;
     sessionId = resumeSessionId;
-    notifyListeners();
+    _notify();
 
     final args = <String>[
       conn.host.claudeCommand,
@@ -81,14 +86,14 @@ class ClaudeChat extends ChangeNotifier {
     } catch (e) {
       _fail('Failed to start Claude: $e');
     }
-    notifyListeners();
+    _notify();
   }
 
   void _fail(String msg) {
     lastError = msg;
     items.add(SystemNoteItem(msg, isError: true));
     busy = false;
-    notifyListeners();
+    _notify();
   }
 
   void _onExit() {
@@ -103,7 +108,7 @@ class ClaudeChat extends ChangeNotifier {
     }
     _streamingText?.streaming = false;
     _streamingText = null;
-    notifyListeners();
+    _notify();
   }
 
   Future<void> stop() async {
@@ -120,7 +125,7 @@ class ClaudeChat extends ChangeNotifier {
     }
     busy = false;
     _streamingText = null;
-    notifyListeners();
+    _notify();
   }
 
   void _write(Map<String, dynamic> obj) {
@@ -135,7 +140,7 @@ class ClaudeChat extends ChangeNotifier {
     if (!isRunning) return;
     items.add(UserItem(text));
     busy = true;
-    notifyListeners();
+    _notify();
     _write({
       'type': 'user',
       'message': {'role': 'user', 'content': text},
@@ -150,7 +155,7 @@ class ClaudeChat extends ChangeNotifier {
     if (isRunning) {
       await start(resumeSessionId: sessionId);
     } else {
-      notifyListeners();
+      _notify();
     }
   }
 
@@ -179,7 +184,7 @@ class ClaudeChat extends ChangeNotifier {
             : {'behavior': 'deny', 'message': message ?? 'User denied this action'},
       },
     });
-    notifyListeners();
+    _notify();
   }
 
   int get pendingPermissionCount =>
@@ -197,7 +202,7 @@ class ClaudeChat extends ChangeNotifier {
       o = jsonDecode(line) as Map<String, dynamic>;
     } catch (_) {
       items.add(SystemNoteItem(line));
-      notifyListeners();
+      _notify();
       return;
     }
     switch (o['type']) {
@@ -216,7 +221,7 @@ class ClaudeChat extends ChangeNotifier {
       default:
         break; // rate_limit_event, control_response, etc.
     }
-    notifyListeners();
+    _notify();
   }
 
   void _onSystem(Map<String, dynamic> o) {
@@ -340,6 +345,7 @@ class ClaudeChat extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     stop();
     super.dispose();
   }

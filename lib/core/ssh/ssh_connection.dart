@@ -13,6 +13,15 @@ typedef HostKeyPrompt = Future<bool> Function(
   bool changed,
 );
 
+/// Shell prelude that makes user-installed tools visible in a non-interactive
+/// shell. `bash -l` skips most of ~/.bashrc, which is where nvm and friends
+/// usually live, so `claude` would otherwise be "not found".
+const shellPrelude = r'''
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/npm-global/bin:$HOME/.npm/bin:$HOME/bin:$HOME/.claude/local:/usr/local/bin:/opt/homebrew/bin:$PATH"
+[ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1
+for __d in "$HOME/.nvm/versions/node"/*/bin "$HOME/.volta/bin" "$HOME/.fnm/aliases/default/bin" "$HOME/.bun/bin"; do [ -d "$__d" ] && PATH="$__d:$PATH"; done
+''';
+
 /// Quote a string for POSIX sh single quotes.
 String shq(String s) => "'${s.replaceAll("'", "'\\''")}'";
 
@@ -72,10 +81,11 @@ class SshConnection extends ChangeNotifier {
       identities: identities,
       onPasswordRequest: () => secrets.password ?? '',
       onVerifyHostKey: (type, fp) async {
-        final hex = fp.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':');
-        if (knownFingerprint == hex) return true;
-        final ok = await onHostKey(type, hex, knownFingerprint != null);
-        if (ok) onTrustHostKey(hex);
+        // dartssh2 hands us the OpenSSH-style "SHA256:<base64>" text as bytes.
+        final text = utf8.decode(fp, allowMalformed: true);
+        if (knownFingerprint == text) return true;
+        final ok = await onHostKey(type, text, knownFingerprint != null);
+        if (ok) onTrustHostKey(text);
         return ok;
       },
       keepAliveInterval: const Duration(seconds: 15),
@@ -83,14 +93,14 @@ class SshConnection extends ChangeNotifier {
     _client = client;
     await client.authenticated;
 
-    client.done.then((_) => _onClosed(null), onError: _onClosed);
+    client.done.then((_) => _onClosed(null), onError: (Object e) => _onClosed(e));
 
     // Resolve $HOME so relative dirs and ~ work everywhere.
     try {
       _homeDir = (await run('printf %s "\$HOME"')).trim();
       if (_homeDir!.isEmpty) _homeDir = null;
     } catch (_) {}
-    notifyListeners();
+    _notify();
   }
 
   void _onClosed(Object? e) {
@@ -98,7 +108,12 @@ class SshConnection extends ChangeNotifier {
     _closed = true;
     error = e?.toString();
     _sftp = null;
-    notifyListeners();
+    _notify();
+  }
+
+  bool _disposed = false;
+  void _notify() {
+    if (!_disposed) notifyListeners();
   }
 
   /// Run a command and return stdout as text.
@@ -111,7 +126,7 @@ class SshConnection extends ChangeNotifier {
   /// Run a command in [workDir] through a login shell so PATH additions from
   /// ~/.profile / ~/.bashrc (nvm, npm-global, ...) are visible.
   Future<SSHSession> execInWorkDir(String command) {
-    final script = 'cd ${shq(workDir)} 2>/dev/null; $command';
+    final script = '$shellPrelude\ncd ${shq(workDir)} 2>/dev/null; $command';
     return client.execute('bash -lc ${shq(script)}');
   }
 
@@ -163,11 +178,12 @@ class SshConnection extends ChangeNotifier {
     try {
       _client?.close();
     } catch (_) {}
-    notifyListeners();
+    _notify();
   }
 
   @override
   void dispose() {
+    _disposed = true;
     close();
     super.dispose();
   }
