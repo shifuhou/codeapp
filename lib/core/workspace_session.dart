@@ -1,6 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'claude/claude_chat.dart';
 import 'claude/session_index.dart';
 import 'models/host.dart';
 import 'ssh/connection_manager.dart';
@@ -12,14 +11,14 @@ import '../features/editor/editor_state.dart';
 /// (host = connection, workspace = folder). The connection outlives it.
 class WorkspaceSession {
   WorkspaceSession(this.hostConn, this.workDir)
-      : claude = ClaudeChat(hostConn.conn, workDir),
-        sessions = ClaudeSessionIndex(hostConn.conn, workDir),
-        editor = EditorState(hostConn.conn);
+      : sessions = ClaudeSessionIndex(hostConn.conn, workDir),
+        editor = EditorState(hostConn.conn, workDir);
 
   final HostConnection hostConn;
   final String workDir;
-  final ClaudeChat claude;
   final ClaudeSessionIndex sessions;
+
+  /// Editor tabs: files and Claude chats.
   final EditorState editor;
 
   SshConnection get conn => hostConn.conn;
@@ -28,7 +27,6 @@ class WorkspaceSession {
   String get dirName => workDir.split('/').where((s) => s.isNotEmpty).lastOrNull ?? '/';
 
   Future<void> dispose() async {
-    claude.dispose();
     editor.dispose();
   }
 }

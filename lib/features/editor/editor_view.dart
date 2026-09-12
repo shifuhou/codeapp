@@ -5,9 +5,12 @@ import 'package:re_editor/re_editor.dart';
 
 import '../../app.dart';
 import '../../core/workspace_session.dart';
+import '../claude/claude_panel.dart';
 import 'editor_state.dart';
 import 'languages.dart';
 
+/// The editor group: a tab strip of files and Claude chats, plus the body of
+/// the active tab.
 class EditorView extends ConsumerWidget {
   const EditorView({super.key});
 
@@ -17,15 +20,17 @@ class EditorView extends ConsumerWidget {
     return ListenableBuilder(
       listenable: editor,
       builder: (context, _) {
-        final f = editor.active;
+        final tab = editor.active;
         return Column(
           children: [
-            _TabBar(editor: editor),
+            _TabStrip(editor: editor),
             const Divider(height: 1),
             Expanded(
-              child: f == null
-                  ? const Center(child: Text('Open a file from the Files tab', style: TextStyle(color: AppColors.textDim)))
-                  : _Editor(key: ValueKey(f.path), file: f, editor: editor),
+              child: switch (tab) {
+                FileTab t => _Editor(key: ValueKey('file:${t.file.path}'), file: t.file, editor: editor),
+                ClaudeTab t => ClaudePanel(key: ValueKey('claude:${identityHashCode(t.chat)}'), chat: t.chat),
+                null => _Empty(editor: editor),
+              },
             ),
           ],
         );
@@ -34,13 +39,36 @@ class EditorView extends ConsumerWidget {
   }
 }
 
-class _TabBar extends StatelessWidget {
-  const _TabBar({required this.editor});
+class _Empty extends StatelessWidget {
+  const _Empty({required this.editor});
   final EditorState editor;
 
   @override
   Widget build(BuildContext context) {
-    final f = editor.active;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('Open a file from the sidebar', style: TextStyle(color: AppColors.textDim)),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: () => editor.openClaude(),
+            icon: const Icon(Icons.auto_awesome, size: 16),
+            label: const Text('New Claude session'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TabStrip extends StatelessWidget {
+  const _TabStrip({required this.editor});
+  final EditorState editor;
+
+  @override
+  Widget build(BuildContext context) {
+    final f = editor.activeFile;
     return Material(
       color: AppColors.panel,
       child: SizedBox(
@@ -50,31 +78,56 @@ class _TabBar extends StatelessWidget {
             Expanded(
               child: ListView.builder(
                 scrollDirection: Axis.horizontal,
-                itemCount: editor.files.length,
+                itemCount: editor.tabs.length,
                 itemBuilder: (context, i) {
-                  final file = editor.files[i];
+                  final tab = editor.tabs[i];
                   final active = i == editor.activeIndex;
+                  final dirty = tab is FileTab && tab.file.dirty;
+                  final busy = tab is ClaudeTab && tab.chat.busy;
+                  final needsAttention = tab is ClaudeTab && tab.chat.pendingPermissionCount > 0;
                   return InkWell(
                     onTap: () => editor.activate(i),
                     child: Container(
-                      padding: const EdgeInsets.only(left: 12, right: 4),
-                      color: active ? AppColors.bg : Colors.transparent,
+                      padding: const EdgeInsets.only(left: 10, right: 2),
+                      decoration: BoxDecoration(
+                        color: active ? AppColors.bg : Colors.transparent,
+                        border: Border(
+                          top: BorderSide(color: active ? AppColors.accent : Colors.transparent, width: 1.5),
+                          right: const BorderSide(color: AppColors.border),
+                        ),
+                      ),
                       child: Row(
                         children: [
+                          Icon(
+                            tab is ClaudeTab ? Icons.auto_awesome : Icons.insert_drive_file_outlined,
+                            size: 13,
+                            color: tab is ClaudeTab ? AppColors.accent : AppColors.textDim,
+                          ),
+                          const SizedBox(width: 6),
                           Text(
-                            file.name,
+                            tab.title,
                             style: TextStyle(
                               fontSize: 12,
                               color: active ? AppColors.text : AppColors.textDim,
-                              fontStyle: file.dirty ? FontStyle.italic : null,
+                              fontStyle: dirty ? FontStyle.italic : null,
                             ),
                           ),
+                          if (busy)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 6),
+                              child: SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5)),
+                            ),
+                          if (needsAttention)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 6),
+                              child: Icon(Icons.help_outline, size: 13, color: AppColors.warn),
+                            ),
                           IconButton(
                             iconSize: 14,
                             padding: EdgeInsets.zero,
                             constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
-                            icon: Icon(file.dirty ? Icons.circle : Icons.close, size: file.dirty ? 9 : 14),
-                            onPressed: () => _close(context, file),
+                            icon: Icon(dirty ? Icons.circle : Icons.close, size: dirty ? 9 : 14),
+                            onPressed: () => _close(context, tab),
                           ),
                         ],
                       ),
@@ -82,6 +135,12 @@ class _TabBar extends StatelessWidget {
                   );
                 },
               ),
+            ),
+            IconButton(
+              tooltip: 'New Claude session',
+              iconSize: 18,
+              icon: const Icon(Icons.add_comment_outlined, color: AppColors.textDim),
+              onPressed: () => editor.openClaude(),
             ),
             if (f != null)
               IconButton(
@@ -108,12 +167,12 @@ class _TabBar extends StatelessWidget {
     }
   }
 
-  Future<void> _close(BuildContext context, OpenFile f) async {
-    if (f.dirty) {
+  Future<void> _close(BuildContext context, WorkspaceTab tab) async {
+    if (tab is FileTab && tab.file.dirty) {
       final r = await showDialog<String>(
         context: context,
         builder: (c) => AlertDialog(
-          title: Text('Save changes to ${f.name}?'),
+          title: Text('Save changes to ${tab.file.name}?'),
           actions: [
             TextButton(onPressed: () => Navigator.pop(c, 'discard'), child: const Text("Don't save")),
             TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancel')),
@@ -122,9 +181,24 @@ class _TabBar extends StatelessWidget {
         ),
       );
       if (r == null) return;
-      if (r == 'save' && context.mounted) await _save(context, f);
+      if (r == 'save' && context.mounted) await _save(context, tab.file);
     }
-    editor.close(f);
+    if (tab is ClaudeTab && tab.chat.busy) {
+      if (!context.mounted) return;
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Claude is still working'),
+          content: const Text('Closing the tab stops the current turn. The session can be resumed later.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Close')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    editor.close(tab);
   }
 }
 

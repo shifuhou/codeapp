@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:re_editor/re_editor.dart';
 
+import '../../core/claude/claude_chat.dart';
 import '../../core/ssh/ssh_connection.dart';
 
 class OpenFile {
@@ -20,24 +21,51 @@ class OpenFile {
   void markSaved() => _savedText = controller.text;
 }
 
-/// Open editor tabs backed by SFTP.
-class EditorState extends ChangeNotifier {
-  EditorState(this.conn);
-  final SshConnection conn;
+/// A tab in the editor area: a file or a Claude session, like VS Code where
+/// Claude Code opens as an editor tab next to files.
+sealed class WorkspaceTab {
+  String get title;
+}
 
-  final List<OpenFile> files = [];
+class FileTab extends WorkspaceTab {
+  FileTab(this.file);
+  final OpenFile file;
+  @override
+  String get title => file.name;
+}
+
+class ClaudeTab extends WorkspaceTab {
+  ClaudeTab(this.chat, {this.label});
+  final ClaudeChat chat;
+  String? label;
+  @override
+  String get title => label ?? (chat.sessionId == null ? 'Claude' : 'Claude ${chat.sessionId!.substring(0, 6)}');
+}
+
+/// Open tabs backed by SFTP (files) and Claude processes (chats).
+class EditorState extends ChangeNotifier {
+  EditorState(this.conn, this.workDir);
+  final SshConnection conn;
+  final String workDir;
+
+  final List<WorkspaceTab> tabs = [];
   int activeIndex = -1;
-  OpenFile? get active =>
-      activeIndex >= 0 && activeIndex < files.length ? files[activeIndex] : null;
+  WorkspaceTab? get active =>
+      activeIndex >= 0 && activeIndex < tabs.length ? tabs[activeIndex] : null;
+
+  Iterable<OpenFile> get files => tabs.whereType<FileTab>().map((t) => t.file);
+  Iterable<ClaudeChat> get chats => tabs.whereType<ClaudeTab>().map((t) => t.chat);
+  OpenFile? get activeFile => switch (active) { FileTab t => t.file, _ => null };
+  ClaudeChat? get activeChat => switch (active) { ClaudeTab t => t.chat, _ => null };
 
   static const maxOpenBytes = 4 * 1024 * 1024;
 
   Future<OpenFile> open(String path) async {
-    final i = files.indexWhere((f) => f.path == path);
+    final i = tabs.indexWhere((t) => t is FileTab && t.file.path == path);
     if (i >= 0) {
       activeIndex = i;
       notifyListeners();
-      return files[i];
+      return (tabs[i] as FileTab).file;
     }
     final bytes = await conn.readFile(path);
     if (bytes.length > maxOpenBytes) {
@@ -46,10 +74,36 @@ class EditorState extends ChangeNotifier {
     final text = utf8.decode(bytes, allowMalformed: true);
     final f = OpenFile(path: path, text: text);
     f.controller.addListener(notifyListeners);
-    files.add(f);
-    activeIndex = files.length - 1;
+    tabs.add(FileTab(f));
+    activeIndex = tabs.length - 1;
     notifyListeners();
     return f;
+  }
+
+  /// Opens (or focuses) a Claude tab. With [sessionId] the stored session is
+  /// resumed; without it a fresh session starts on first message.
+  ClaudeChat openClaude({String? sessionId, String? label}) {
+    if (sessionId != null) {
+      final i = tabs.indexWhere((t) => t is ClaudeTab && t.chat.sessionId == sessionId);
+      if (i >= 0) {
+        activeIndex = i;
+        notifyListeners();
+        return (tabs[i] as ClaudeTab).chat;
+      }
+    }
+    final chat = ClaudeChat(conn, workDir);
+    chat.addListener(notifyListeners);
+    tabs.add(ClaudeTab(chat, label: label));
+    activeIndex = tabs.length - 1;
+    if (sessionId != null) chat.start(resumeSessionId: sessionId);
+    notifyListeners();
+    return chat;
+  }
+
+  /// The most recent Claude tab, creating one if there is none.
+  ClaudeChat latestClaude() {
+    final t = tabs.lastWhere((t) => t is ClaudeTab, orElse: () => ClaudeTab(openClaude()));
+    return (t as ClaudeTab).chat;
   }
 
   Future<void> save(OpenFile f) async {
@@ -67,17 +121,23 @@ class EditorState extends ChangeNotifier {
   }
 
   Future<void> saveActive() async {
-    final f = active;
+    final f = activeFile;
     if (f != null) await save(f);
   }
 
-  void close(OpenFile f) {
-    final i = files.indexOf(f);
+  void close(WorkspaceTab tab) {
+    final i = tabs.indexOf(tab);
     if (i < 0) return;
-    f.controller.removeListener(notifyListeners);
-    files.removeAt(i);
-    f.controller.dispose();
-    if (activeIndex >= files.length) activeIndex = files.length - 1;
+    tabs.removeAt(i);
+    switch (tab) {
+      case FileTab t:
+        t.file.controller.removeListener(notifyListeners);
+        t.file.controller.dispose();
+      case ClaudeTab t:
+        t.chat.removeListener(notifyListeners);
+        t.chat.dispose();
+    }
+    if (activeIndex >= tabs.length) activeIndex = tabs.length - 1;
     notifyListeners();
   }
 
@@ -88,8 +148,13 @@ class EditorState extends ChangeNotifier {
 
   @override
   void dispose() {
-    for (final f in files) {
-      f.controller.dispose();
+    for (final t in tabs) {
+      switch (t) {
+        case FileTab f:
+          f.file.controller.dispose();
+        case ClaudeTab c:
+          c.chat.dispose();
+      }
     }
     super.dispose();
   }

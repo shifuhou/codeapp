@@ -124,7 +124,7 @@ void main() {
   }, skip: !enabled);
 
   test('runs Claude Code headless and gets a reply', () async {
-    final chat = ws.claude;
+    final chat = ws.editor.openClaude();
     chat.modelOverride = 'claude-haiku-4-5-20251001';
     final done = Completer<void>();
     chat.addListener(() {

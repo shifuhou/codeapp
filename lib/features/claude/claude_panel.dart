@@ -11,8 +11,10 @@ import '../../core/claude/claude_protocol.dart';
 import '../../core/claude/session_index.dart';
 import '../../core/workspace_session.dart';
 
+/// One Claude chat, shown as an editor tab.
 class ClaudePanel extends ConsumerStatefulWidget {
-  const ClaudePanel({super.key});
+  const ClaudePanel({super.key, required this.chat});
+  final ClaudeChat chat;
 
   @override
   ConsumerState<ClaudePanel> createState() => _ClaudePanelState();
@@ -40,7 +42,7 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
     final text = _input.text.trim();
     if (text.isEmpty) return;
     _input.clear();
-    ref.read(workspaceProvider).claude.send(text);
+    widget.chat.send(text);
     _focus.requestFocus();
   }
 
@@ -70,16 +72,15 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
     );
     if (picked == null) return;
     if (picked == '__new__') {
-      ws.claude.start();
+      widget.chat.start();
     } else {
-      ws.claude.start(resumeSessionId: picked);
+      widget.chat.start(resumeSessionId: picked);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final ws = ref.watch(workspaceProvider);
-    final chat = ws.claude;
+    final chat = widget.chat;
     return ListenableBuilder(
       listenable: chat,
       builder: (context, _) {
@@ -544,8 +545,11 @@ class _ToolCallView extends StatelessWidget {
 /// Sessions stored on the remote for the workspace folder. In [pickMode] the
 /// widget pops with the chosen session id (or `__new__`).
 class ClaudeSessionList extends ConsumerStatefulWidget {
-  const ClaudeSessionList({super.key, this.pickMode = false});
+  const ClaudeSessionList({super.key, this.pickMode = false, this.onOpened});
   final bool pickMode;
+
+  /// Called after a session was opened as a tab (not in pick mode).
+  final VoidCallback? onOpened;
 
   @override
   ConsumerState<ClaudeSessionList> createState() => _ClaudeSessionListState();
@@ -571,18 +575,19 @@ class _ClaudeSessionListState extends ConsumerState<ClaudeSessionList> {
     }
   }
 
-  void _choose(String id) {
+  void _choose(String id, {String? title}) {
     if (widget.pickMode) {
       Navigator.pop(context, id);
     } else {
-      final chat = ref.read(workspaceProvider).claude;
-      id == '__new__' ? chat.start() : chat.start(resumeSessionId: id);
+      final editor = ref.read(workspaceProvider).editor;
+      id == '__new__' ? editor.openClaude() : editor.openClaude(sessionId: id, label: title);
+      widget.onOpened?.call();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final chat = ref.watch(workspaceProvider).claude;
+    final editor = ref.watch(workspaceProvider).editor;
     return Column(
       children: [
         ListTile(
@@ -600,12 +605,12 @@ class _ClaudeSessionListState extends ConsumerState<ClaudeSessionList> {
                   : _sessions!.isEmpty
                       ? const Center(child: Text('No sessions for this folder yet', style: TextStyle(color: AppColors.textDim)))
                       : ListenableBuilder(
-                          listenable: chat,
+                          listenable: editor,
                           builder: (context, _) => ListView.builder(
                             itemCount: _sessions!.length,
                             itemBuilder: (context, i) {
                               final s = _sessions![i];
-                              final current = s.id == chat.sessionId;
+                              final current = editor.chats.any((c) => c.sessionId == s.id);
                               return ListTile(
                                 selected: current,
                                 selectedTileColor: AppColors.accentDim.withValues(alpha: 0.4),
@@ -636,7 +641,7 @@ class _ClaudeSessionListState extends ConsumerState<ClaudeSessionList> {
                                     }
                                   },
                                 ),
-                                onTap: () => _choose(s.id),
+                                onTap: () => _choose(s.id, title: _shortTitle(s.title)),
                               );
                             },
                           ),
@@ -645,6 +650,8 @@ class _ClaudeSessionListState extends ConsumerState<ClaudeSessionList> {
       ],
     );
   }
+
+  static String _shortTitle(String t) => t.length > 18 ? '${t.substring(0, 18)}…' : t;
 
   static String _ago(DateTime t) {
     final d = DateTime.now().difference(t);
