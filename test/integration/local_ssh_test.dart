@@ -86,6 +86,13 @@ void main() {
     }
     expect(list, isNotEmpty);
     expect(list.first.title, isNotEmpty);
+    // Headless test sessions (sdk-cli) are hidden like in VS Code.
+    expect(list.any((s) => s.title.startsWith('Reply with exactly')), isFalse);
+
+    final history = await ws.sessions.loadTranscript(list.first.id);
+    stdout.writeln('history items: ${history.length}');
+    expect(history.whereType<UserItem>(), isNotEmpty);
+    expect(history.whereType<ToolCallItem>(), isNotEmpty);
   }, skip: !enabled);
 
   test('detects a listening port and forwards traffic through SSH', () async {
@@ -146,5 +153,7 @@ void main() {
     // The process should still be alive for a second turn.
     expect(chat.isRunning, isTrue);
     await chat.stop();
+    // Don't leave test sessions in the real session list.
+    await ws.sessions.delete(chat.sessionId!);
   }, skip: !enabled);
 }

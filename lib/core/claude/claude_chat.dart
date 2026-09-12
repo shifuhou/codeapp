@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../ssh/ssh_connection.dart';
 import 'claude_protocol.dart';
+import 'session_index.dart';
 
 /// Drives one `claude -p` process on the remote over an SSH exec channel and
 /// turns its stream-json output into a chat timeline.
@@ -20,6 +21,16 @@ class ClaudeChat extends ChangeNotifier {
 
   /// Command used to launch Claude Code on the remote.
   static const claudeCommand = 'claude';
+
+  /// Tag sessions the way the VS Code extension does so they are listed in
+  /// both places (plain `-p` runs are tagged `sdk-cli` and hidden).
+  static const entrypoint = 'claude-vscode';
+
+  /// True while the stored transcript of a resumed session is loading.
+  bool loadingHistory = false;
+
+  /// Number of leading [items] that came from the stored transcript.
+  int historyItemCount = 0;
 
   final List<ChatItem> items = [];
   String? sessionId;
@@ -52,7 +63,25 @@ class ClaudeChat extends ChangeNotifier {
     _streamingText = null;
     lastError = null;
     sessionId = resumeSessionId;
+    historyItemCount = 0;
     _notify();
+
+    if (resumeSessionId != null) {
+      loadingHistory = true;
+      _notify();
+      try {
+        final history = await ClaudeSessionIndex(conn, workDir).loadTranscript(resumeSessionId);
+        items.addAll(history);
+        historyItemCount = history.length;
+        for (final t in history.whereType<ToolCallItem>()) {
+          _toolCalls[t.call.id] = t;
+        }
+      } catch (e) {
+        items.add(SystemNoteItem('Could not load history: $e', isError: true));
+      }
+      loadingHistory = false;
+      _notify();
+    }
 
     final args = <String>[
       claudeCommand,
@@ -72,7 +101,7 @@ class ClaudeChat extends ChangeNotifier {
     final cmd = args.map(shq).join(' ');
 
     try {
-      final s = await conn.execIn(workDir, 'exec $cmd');
+      final s = await conn.execIn(workDir, 'CLAUDE_CODE_ENTRYPOINT=$entrypoint exec $cmd');
       _session = s;
       _stdoutSub = s.stdout
           .cast<List<int>>()
@@ -84,9 +113,6 @@ class ClaudeChat extends ChangeNotifier {
           .transform(utf8.decoder)
           .listen((t) => _stderrBuf.write(t));
       s.done.then((_) => _onExit());
-      if (resumeSessionId != null) {
-        items.add(SystemNoteItem('Resumed session $resumeSessionId'));
-      }
     } catch (e) {
       _fail('Failed to start Claude: $e');
     }

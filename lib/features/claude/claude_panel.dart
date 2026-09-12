@@ -24,6 +24,10 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
   final _focus = FocusNode();
   int _lastCount = 0;
 
+  /// Per-turn expand/collapse overrides (turn index -> expanded).
+  final Map<int, bool> _turnOverride = {};
+  bool? _allOverride; // set by "collapse all" / "expand all"
+
   @override
   void dispose() {
     _input.dispose();
@@ -85,17 +89,65 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
             _toolbar(chat),
             const Divider(height: 1),
             Expanded(
-              child: chat.items.isEmpty
+              child: chat.loadingHistory && chat.items.isEmpty
+                  ? const Center(child: CircularProgressIndicator())
+                  : chat.items.isEmpty
                   ? _emptyState(chat)
-                  : ListView.builder(
-                      controller: _scroll,
-                      padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
-                      itemCount: chat.items.length,
-                      itemBuilder: (context, i) => _ItemView(item: chat.items[i], chat: chat),
-                    ),
+                  : _turnList(chat),
             ),
             if (chat.busy) const LinearProgressIndicator(minHeight: 2),
             _inputBar(chat),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Groups the timeline into turns: each user message followed by
+  /// everything Claude did in response.
+  static List<_Turn> _turns(ClaudeChat chat) {
+    final turns = <_Turn>[];
+    var i = 0;
+    for (final item in chat.items) {
+      if (item is UserItem || turns.isEmpty) {
+        turns.add(_Turn(item is UserItem ? item : null, i < chat.historyItemCount));
+      }
+      if (item is! UserItem) turns.last.body.add(item);
+      i++;
+    }
+    return turns;
+  }
+
+  bool _isExpanded(int index, int count, _Turn t) {
+    final o = _turnOverride[index];
+    if (o != null) return o;
+    if (_allOverride != null) return _allOverride!;
+    // History turns start collapsed so your own prompts are easy to find;
+    // the latest turn and live turns start open.
+    return index == count - 1 || !t.fromHistory;
+  }
+
+  Widget _turnList(ClaudeChat chat) {
+    final turns = _turns(chat);
+    return ListView.builder(
+      controller: _scroll,
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+      itemCount: turns.length,
+      itemBuilder: (context, i) {
+        final t = turns[i];
+        final expanded = _isExpanded(i, turns.length, t);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (t.user != null)
+              _TurnHeader(
+                turn: t,
+                index: i,
+                expanded: expanded,
+                onToggle: () => setState(() => _turnOverride[i] = !expanded),
+              ),
+            if (expanded)
+              for (final item in t.body) _ItemView(item: item, chat: chat),
           ],
         );
       },
@@ -132,6 +184,22 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
                   ],
                 ),
               ),
+            ),
+            IconButton(
+              tooltip: 'Collapse all turns',
+              icon: const Icon(Icons.unfold_less, size: 18),
+              onPressed: () => setState(() {
+                _turnOverride.clear();
+                _allOverride = false;
+              }),
+            ),
+            IconButton(
+              tooltip: 'Expand all turns',
+              icon: const Icon(Icons.unfold_more, size: 18),
+              onPressed: () => setState(() {
+                _turnOverride.clear();
+                _allOverride = true;
+              }),
             ),
             PopupMenuButton<PermissionMode>(
               tooltip: 'Permission mode',
@@ -249,7 +317,7 @@ class _ItemView extends StatelessWidget {
   Widget build(BuildContext context) {
     return switch (item) {
       UserItem u => _bubble(
-          align: Alignment.centerRight,
+          align: Alignment.centerLeft,
           color: AppColors.accentDim,
           child: SelectableText(u.text, style: const TextStyle(fontSize: 14)),
         ),
@@ -585,5 +653,100 @@ class _ClaudeSessionListState extends ConsumerState<ClaudeSessionList> {
     if (d.inDays < 1) return '${d.inHours}h ago';
     if (d.inDays < 30) return '${d.inDays}d ago';
     return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
+  }
+}
+
+class _Turn {
+  _Turn(this.user, this.fromHistory);
+  final UserItem? user;
+  final bool fromHistory;
+  final List<ChatItem> body = [];
+
+  int get toolCount => body.whereType<ToolCallItem>().length;
+  bool get hasPendingPermission =>
+      body.whereType<ToolCallItem>().any((t) => t.pendingPermission != null);
+
+  /// Last thing Claude said in this turn, for the collapsed preview.
+  String get preview {
+    for (final item in body.reversed) {
+      if (item is AssistantTextItem && item.text.trim().isNotEmpty) {
+        return item.text.trim().split('\n').first;
+      }
+    }
+    return '';
+  }
+}
+
+/// Your prompt as a prominent, clickable header. Tapping collapses or
+/// expands everything Claude did in response.
+class _TurnHeader extends StatelessWidget {
+  const _TurnHeader({
+    required this.turn,
+    required this.index,
+    required this.expanded,
+    required this.onToggle,
+  });
+  final _Turn turn;
+  final int index;
+  final bool expanded;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final text = turn.user!.text;
+    final preview = turn.preview;
+    return Container(
+      margin: EdgeInsets.only(top: index == 0 ? 0 : 14, bottom: 6),
+      decoration: BoxDecoration(
+        color: AppColors.accentDim.withValues(alpha: 0.35),
+        borderRadius: BorderRadius.circular(8),
+        border: const Border(left: BorderSide(color: AppColors.accent, width: 3)),
+      ),
+      child: InkWell(
+        onTap: onToggle,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.only(top: 2, right: 8),
+                child: Icon(Icons.person_outline, size: 16, color: AppColors.accent),
+              ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    expanded
+                        ? SelectableText(text, style: const TextStyle(fontSize: 14, height: 1.4))
+                        : Text(text, maxLines: 3, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14, height: 1.4)),
+                    if (!expanded && turn.body.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          [
+                            if (turn.toolCount > 0) '${turn.toolCount} tool call${turn.toolCount == 1 ? '' : 's'}',
+                            if (preview.isNotEmpty) preview,
+                          ].join('  ·  '),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 12, color: AppColors.textDim),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (turn.hasPendingPermission)
+                const Padding(
+                  padding: EdgeInsets.only(right: 6, top: 2),
+                  child: Icon(Icons.help_outline, size: 16, color: AppColors.warn),
+                ),
+              Icon(expanded ? Icons.expand_less : Icons.expand_more, size: 18, color: AppColors.textDim),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
