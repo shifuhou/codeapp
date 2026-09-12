@@ -151,6 +151,9 @@ class ClaudeChat extends ChangeNotifier {
     if (s != null) {
       try {
         s.close();
+        // Wait for the process to exit so its final transcript writes land
+        // before callers touch the session file (e.g. delete it).
+        await s.done.timeout(const Duration(seconds: 5));
       } catch (_) {}
     }
     busy = false;
