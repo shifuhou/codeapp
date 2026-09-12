@@ -103,7 +103,7 @@ class HostsNotifier extends AsyncNotifier<List<HostConfig>> {
   Future<List<HostConfig>> build() => HostStore.instance.loadHosts();
 
   Future<void> upsert(HostConfig host, {HostSecrets? secrets}) async {
-    final list = [...(state.value ?? [])];
+    final list = <HostConfig>[...?state.value];
     final i = list.indexWhere((h) => h.id == host.id);
     if (i >= 0) {
       list[i] = host;
@@ -116,7 +116,7 @@ class HostsNotifier extends AsyncNotifier<List<HostConfig>> {
   }
 
   Future<void> remove(String id) async {
-    final list = [...(state.value ?? [])]..removeWhere((h) => h.id == id);
+    final list = <HostConfig>[...?state.value]..removeWhere((h) => h.id == id);
     await HostStore.instance.saveHosts(list);
     await HostStore.instance.deleteSecrets(id);
     state = AsyncData(list);
