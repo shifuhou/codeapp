@@ -7,9 +7,10 @@ import 'package:codeapp/core/models/host.dart';
 import 'package:codeapp/core/ssh/ssh_connection.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-ClaudeChat _chat() => ClaudeChat(SshConnection(
-      HostConfig(id: 'x', name: 'x', host: 'h', username: 'u'),
-    ));
+ClaudeChat _chat() => ClaudeChat(
+      SshConnection(HostConfig(id: 'x', host: 'h', username: 'u')),
+      '/home/u/project',
+    );
 
 List<String> _lines(String name) =>
     File('test/fixtures/$name').readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
@@ -59,6 +60,19 @@ void main() {
   test('encodes the project dir the way Claude Code does', () {
     expect(ClaudeSessionIndex.encodeProjectDir('/home/shifu/codeapp'), '-home-shifu-codeapp');
     expect(ClaudeSessionIndex.encodeProjectDir('/home/a/.config/x_y'), '-home-a--config-x-y');
+  });
+
+  test('parses host entry text like VS Code', () {
+    final a = HostConfig.parse('shifu@1.2.3.4', id: 'a')!;
+    expect((a.username, a.host, a.port), ('shifu', '1.2.3.4', 22));
+    final b = HostConfig.parse('ssh -p 2222 root@example.com', id: 'b')!;
+    expect((b.username, b.host, b.port), ('root', 'example.com', 2222));
+    final c = HostConfig.parse('user@host:2200', id: 'c')!;
+    expect((c.username, c.host, c.port), ('user', 'host', 2200));
+    final d = HostConfig.parse('justhost', id: 'd')!;
+    expect((d.username, d.host, d.port), ('', 'justhost', 22));
+    expect(HostConfig.parse('   ', id: 'e'), isNull);
+    expect(b.target, 'root@example.com:2222');
   });
 
   test('shell quoting', () {

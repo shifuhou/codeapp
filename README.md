@@ -5,7 +5,9 @@
 
 功能：
 
-- **SSH 主机管理**：保存多台服务器，私钥/密码存在系统钥匙串里，首次连接确认主机指纹。
+- **SSH 主机管理**：和 VS Code Remote 一样的两层结构。第一层是机器（桌面端自动读取 `~/.ssh/config`，
+  也可以手动加 `user@host`），展开是这台机器最近打开过的目录；第二层是选目录（最近、浏览、新建）。
+  认证走系统的 `~/.ssh/id_*` 密钥，能免密就直接进，否则弹密码框，密码不保存。连接在退出目录后保持。
 - **文件与编辑器**：通过 SFTP 浏览、新建、重命名、删除、编辑文件，带语法高亮，Ctrl/Cmd+S 保存。
 - **终端**：完整的 xterm 终端，手机上有 Esc / Tab / Ctrl / 方向键等辅助按键。
 - **Claude Code**：在服务器上以无头模式运行 `claude`，用你自己的订阅登录。
@@ -51,16 +53,17 @@ flutter run -d macos      # 或 windows / linux / 你的 iPhone
 ```
 lib/
   core/
-    models/host.dart          主机配置模型
-    storage/host_store.dart   主机列表 JSON + 钥匙串密钥 + known_hosts
-    ssh/ssh_connection.dart   一条 SSH 连接：exec / shell / sftp
+    models/host.dart          主机模型 + user@host 解析
+    storage/host_store.dart   ~/.ssh/config 解析 + 手动主机 + 最近目录 + known_hosts
+    ssh/ssh_connection.dart   一条 SSH 连接：系统密钥/密码认证，exec / shell / sftp
+    ssh/connection_manager.dart 跨工作区保持的连接 + 每台机器的端口转发
     ssh/port_forwarder.dart   本地端口转发 + 自动发现
     claude/claude_protocol.dart  stream-json 协议模型
     claude/claude_chat.dart      驱动 claude -p 进程，权限确认
     claude/session_index.dart    读取 ~/.claude/projects 里的 session
     workspace_session.dart    一个已连接工作区的所有状态
   features/
-    hosts/      主机列表、编辑表单、连接流程
+    hosts/      主机树、连接流程（密码/口令/指纹弹窗）、目录选择页
     workspace/  主界面（宽屏三栏 / 手机底部导航）
     files/      SFTP 文件浏览器
     editor/     多标签编辑器

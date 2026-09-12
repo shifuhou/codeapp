@@ -7,6 +7,7 @@ import 'dart:io';
 
 import 'package:codeapp/core/claude/claude_protocol.dart';
 import 'package:codeapp/core/models/host.dart';
+import 'package:codeapp/core/ssh/connection_manager.dart';
 import 'package:codeapp/core/ssh/ssh_connection.dart';
 import 'package:codeapp/core/workspace_session.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -24,34 +25,39 @@ void main() {
     if (!enabled) return;
     final host = HostConfig(
       id: 'local',
-      name: 'local',
       host: '127.0.0.1',
       username: user,
-      remoteDir: workDir,
+      identityFile: keyPath,
     );
     final conn = SshConnection(host);
     await conn.connect(
-      HostSecrets(privateKey: File(keyPath).readAsStringSync()),
+      AuthPrompts(
+        askPassword: (_) async => null,
+        askPassphrase: (_) async => null,
+        onHostKey: (type, fp, changed) async {
+          stdout.writeln('host key $type $fp');
+          return true;
+        },
+      ),
       knownFingerprint: null,
       onTrustHostKey: (_) {},
-      onHostKey: (type, fp, changed) async {
-        stdout.writeln('host key $type $fp');
-        return true;
-      },
     );
-    ws = WorkspaceSession(conn);
+    ws = WorkspaceSession(HostConnection(conn), workDir);
   });
 
   tearDownAll(() async {
-    if (enabled) await ws.dispose();
+    if (enabled) {
+      await ws.dispose();
+      await ws.hostConn.dispose();
+    }
   });
 
   test('connects, resolves home and workDir, runs commands', () async {
     final who = (await ws.conn.run('whoami')).trim();
     expect(who, user);
     expect(ws.conn.homeDir, home);
-    expect(ws.conn.workDir, workDir);
-    final s = await ws.conn.execInWorkDir('pwd');
+    expect(ws.conn.expand('~/x'), '$home/x');
+    final s = await ws.conn.execIn(workDir, 'pwd');
     final out = utf8.decode(await s.stdout.fold<List<int>>([], (a, b) => a..addAll(b)));
     expect(out.trim(), workDir);
   }, skip: !enabled);

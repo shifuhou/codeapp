@@ -173,7 +173,7 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
             const Icon(Icons.auto_awesome, size: 40, color: AppColors.textDim),
             const SizedBox(height: 12),
             Text(
-              'Claude Code in ${ref.read(workspaceProvider).conn.workDir}',
+              'Claude Code in ${ref.read(workspaceProvider).workDir}',
               textAlign: TextAlign.center,
               style: const TextStyle(color: AppColors.textDim),
             ),

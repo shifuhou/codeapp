@@ -18,8 +18,9 @@ class ClaudeSessionInfo {
 /// Lists Claude Code sessions stored on the remote under
 /// `~/.claude/projects/<encoded cwd>/<session>.jsonl`.
 class ClaudeSessionIndex {
-  ClaudeSessionIndex(this.conn);
+  ClaudeSessionIndex(this.conn, this.workDir);
   final SshConnection conn;
+  final String workDir;
 
   /// Claude Code encodes the project path by replacing every character that
   /// is not a letter or digit with '-'.
@@ -27,7 +28,7 @@ class ClaudeSessionIndex {
       absPath.replaceAll(RegExp(r'[^A-Za-z0-9]'), '-');
 
   String get projectDir =>
-      '${conn.homeDir}/.claude/projects/${encodeProjectDir(conn.workDir)}';
+      '${conn.homeDir}/.claude/projects/${encodeProjectDir(workDir)}';
 
   Future<List<ClaudeSessionInfo>> list() async {
     // For each session file (newest first) print: id, mtime, size, then the

@@ -59,8 +59,8 @@ class _TerminalPaneState extends ConsumerState<TerminalPane> {
       s.stdout.cast<List<int>>().transform(utf8.decoder).listen(_terminal.write);
       s.stderr.cast<List<int>>().transform(utf8.decoder).listen(_terminal.write);
       // cd into the workspace folder.
-      final dir = ws.conn.workDir;
-      if (dir != '~') s.write(utf8.encode('cd ${_q(dir)} && clear\n'));
+      final dir = ws.workDir;
+      if (dir.isNotEmpty) s.write(utf8.encode('cd ${_q(dir)} && clear\n'));
       s.done.then((_) {
         if (!mounted) return;
         setState(() {

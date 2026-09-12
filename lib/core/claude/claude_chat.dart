@@ -13,9 +13,13 @@ import 'claude_protocol.dart';
 /// The process stays alive across turns (stream-json input) so it behaves
 /// like an interactive session; `sessionId` can be resumed later.
 class ClaudeChat extends ChangeNotifier {
-  ClaudeChat(this.conn);
+  ClaudeChat(this.conn, this.workDir);
 
   final SshConnection conn;
+  final String workDir;
+
+  /// Command used to launch Claude Code on the remote.
+  static const claudeCommand = 'claude';
 
   final List<ChatItem> items = [];
   String? sessionId;
@@ -51,7 +55,7 @@ class ClaudeChat extends ChangeNotifier {
     _notify();
 
     final args = <String>[
-      conn.host.claudeCommand,
+      claudeCommand,
       '-p',
       '--input-format', 'stream-json',
       '--output-format', 'stream-json',
@@ -68,7 +72,7 @@ class ClaudeChat extends ChangeNotifier {
     final cmd = args.map(shq).join(' ');
 
     try {
-      final s = await conn.execInWorkDir('exec $cmd');
+      final s = await conn.execIn(workDir, 'exec $cmd');
       _session = s;
       _stdoutSub = s.stdout
           .cast<List<int>>()

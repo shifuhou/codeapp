@@ -24,7 +24,7 @@ class _FileBrowserState extends ConsumerState<FileBrowser> {
   @override
   void initState() {
     super.initState();
-    _load(ref.read(workspaceProvider).conn.workDir);
+    _load(ref.read(workspaceProvider).workDir);
   }
 
   Future<void> _load(String dir) async {
@@ -165,7 +165,7 @@ class _FileBrowserState extends ConsumerState<FileBrowser> {
   @override
   Widget build(BuildContext context) {
     final ws = ref.watch(workspaceProvider);
-    final dir = _dir ?? ws.conn.workDir;
+    final dir = _dir ?? ws.workDir;
     final segs = dir.split('/').where((s) => s.isNotEmpty).toList();
     return Column(
       children: [
@@ -198,7 +198,7 @@ class _FileBrowserState extends ConsumerState<FileBrowser> {
                 IconButton(
                   icon: const Icon(Icons.home_outlined, size: 20),
                   tooltip: 'Workspace folder',
-                  onPressed: () => _load(ws.conn.workDir),
+                  onPressed: () => _load(ws.workDir),
                 ),
                 IconButton(
                   icon: const Icon(Icons.refresh, size: 20),

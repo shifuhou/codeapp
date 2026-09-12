@@ -30,7 +30,6 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
   void initState() {
     super.initState();
     final ws = ref.read(workspaceProvider);
-    ws.ports.startWatching();
     _portSub = ws.ports.newForwardEvents.stream.listen((fp) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -67,10 +66,10 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
       context: context,
       builder: (c) => AlertDialog(
         title: Text('$dirty unsaved file${dirty == 1 ? '' : 's'}'),
-        content: const Text('Disconnect and discard unsaved changes?'),
+        content: const Text('Leave this folder and discard unsaved changes?'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Stay')),
-          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Disconnect')),
+          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Leave')),
         ],
       ),
     );
@@ -101,7 +100,15 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
                 ),
               ),
               const SizedBox(width: 8),
-              Flexible(child: Text(ws.host.label, overflow: TextOverflow.ellipsis)),
+              Flexible(
+                child: Text.rich(
+                  TextSpan(children: [
+                    TextSpan(text: ws.dirName),
+                    TextSpan(text: '  ${ws.host.label}', style: const TextStyle(fontSize: 12, color: AppColors.textDim)),
+                  ]),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
             ],
           ),
           actions: [
