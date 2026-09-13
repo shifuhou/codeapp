@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -32,20 +33,162 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
   final Map<int, bool> _turnOverride = {};
   bool? _allOverride;
 
+  /// Slash-command suggestions for the current input (empty when hidden).
+  List<_SlashCommand> _suggestions = [];
+
+  static const _modelChoices = <String, String>{
+    'default': 'Default (whatever the CLI is configured with)',
+    'opus': 'Claude Opus 5',
+    'sonnet': 'Claude Sonnet 5',
+    'haiku': 'Claude Haiku 4.5',
+    'claude-fable-5-1': 'Claude Fable 5.1',
+  };
+
+  late final List<_SlashCommand> _localCommands = [
+    _SlashCommand('model', 'Switch model: /model opus|sonnet|haiku|<id>', (a) => _cmdModel(a)),
+    _SlashCommand('mode', 'Permission mode: /mode ask|edits|plan|bypass', (a) => _cmdMode(a)),
+    _SlashCommand('permissions', 'Same as /mode', (a) => _cmdMode(a)),
+    _SlashCommand('usage', 'Show tokens, cost and context size for this session', (_) => _note(widget.chat.usageSummary())),
+    _SlashCommand('cost', 'Same as /usage', (_) => _note(widget.chat.usageSummary())),
+    _SlashCommand('new', 'Start a new session', (_) => widget.chat.start()),
+    _SlashCommand('clear', 'Same as /new', (_) => widget.chat.start()),
+    _SlashCommand('resume', 'Pick a stored session to resume', (_) => _pickSession()),
+    _SlashCommand('stop', 'Interrupt the current turn', (_) => widget.chat.interrupt()),
+    _SlashCommand('compact', 'Ask Claude Code to compact the conversation', (a) => _forward('/compact', a)),
+    _SlashCommand('help', 'List commands', (_) => _cmdHelp()),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _input.addListener(_onInputChanged);
+  }
+
+  void _onInputChanged() {
+    final t = _input.text;
+    List<_SlashCommand> next = [];
+    if (t.startsWith('/') && !t.contains('\n')) {
+      final typed = t.split(' ').first.substring(1).toLowerCase();
+      final all = [
+        ..._localCommands,
+        for (final c in widget.chat.cliSlashCommands)
+          if (!_localCommands.any((l) => l.name == c)) _SlashCommand(c, 'Claude Code command', (a) => _forward('/$c', a)),
+      ];
+      next = all.where((c) => c.name.startsWith(typed)).toList();
+      if (t.contains(' ') && next.length > 1) next = next.where((c) => c.name == typed).toList();
+    }
+    if (next.length != _suggestions.length || !identical(next.firstOrNull, _suggestions.firstOrNull)) {
+      setState(() => _suggestions = next);
+    }
+  }
+
+  void _note(String text) => setState(() => widget.chat.items.add(SystemNoteItem(text)));
+
+  void _forward(String cmd, String args) => widget.chat.send(args.isEmpty ? cmd : '$cmd $args');
+
+  Future<void> _cmdModel(String arg) async {
+    var id = arg.trim();
+    if (id.isEmpty) {
+      final picked = await showDialog<String>(
+        context: context,
+        builder: (c) => SimpleDialog(
+          title: const Text('Model'),
+          children: [
+            for (final e in _modelChoices.entries)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(c, e.key),
+                child: Row(children: [
+                  Icon(
+                    (widget.chat.modelOverride ?? 'default') == e.key ? Icons.radio_button_checked : Icons.radio_button_off,
+                    size: 16,
+                    color: AppColors.accent,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text('${e.key}  ', style: const TextStyle(fontSize: 14))),
+                  Text(e.value, style: const TextStyle(fontSize: 12, color: AppColors.textDim)),
+                ]),
+              ),
+          ],
+        ),
+      );
+      if (picked == null) return;
+      id = picked;
+    }
+    await widget.chat.setModel(id);
+  }
+
+  Future<void> _cmdMode(String arg) async {
+    final a = arg.trim().toLowerCase();
+    final m = switch (a) {
+      'ask' || 'default' || 'normal' => PermissionMode.normal,
+      'edits' || 'acceptedits' || 'auto' => PermissionMode.acceptEdits,
+      'plan' => PermissionMode.plan,
+      'bypass' || 'bypasspermissions' || 'yolo' => PermissionMode.bypassPermissions,
+      _ => null,
+    };
+    if (m == null) {
+      _note('Usage: /mode ask | edits | plan | bypass   (current: ${widget.chat.permissionMode.label})');
+      return;
+    }
+    await widget.chat.setPermissionMode(m);
+  }
+
+  void _cmdHelp() {
+    final lines = [
+      for (final c in _localCommands) '/${c.name}  —  ${c.help}',
+      if (widget.chat.cliSlashCommands.isNotEmpty)
+        'Claude Code commands: ${widget.chat.cliSlashCommands.map((c) => '/$c').join('  ')}',
+    ];
+    _note(lines.join('\n'));
+  }
+
+  /// Returns true when [text] was handled as a slash command.
+  Future<bool> _runSlash(String text) async {
+    if (!text.startsWith('/')) return false;
+    if (text.trim() == '/') return true; // a bare slash is never a message
+    final sp = text.indexOf(' ');
+    final name = (sp < 0 ? text.substring(1) : text.substring(1, sp)).toLowerCase();
+    final args = sp < 0 ? '' : text.substring(sp + 1).trim();
+    final local = _localCommands.where((c) => c.name == name).firstOrNull;
+    if (local != null) {
+      widget.chat.items.add(UserItem(text));
+      setState(() {});
+      await local.run(args);
+      return true;
+    }
+    // Unknown here: let Claude Code handle it (custom commands, skills).
+    return false;
+  }
+
+  void _cycleMode() {
+    final all = PermissionMode.values;
+    final next = all[(all.indexOf(widget.chat.permissionMode) + 1) % all.length];
+    widget.chat.setPermissionMode(next);
+  }
+
   @override
   void dispose() {
+    _input.removeListener(_onInputChanged);
     _input.dispose();
     _scroll.dispose();
     _focus.dispose();
     super.dispose();
   }
 
-  void _send() {
+  Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty) return;
     _input.clear();
-    widget.chat.send(text);
     _focus.requestFocus();
+    if (await _runSlash(text)) return;
+    widget.chat.send(text);
+  }
+
+  void _completeSuggestion() {
+    final first = _suggestions.firstOrNull;
+    if (first == null) return;
+    _input.text = '/${first.name} ';
+    _input.selection = TextSelection.collapsed(offset: _input.text.length);
   }
 
   bool _scrolledOnce = false;
@@ -140,8 +283,13 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
                       ? _emptyState(chat)
                       : _turnList(chat),
             ),
-            if (chat.busy) const LinearProgressIndicator(minHeight: 2),
-            _inputBar(chat),
+            if (chat.busy) const LinearProgressIndicator(key: ValueKey('busy'), minHeight: 2),
+            // Keys keep the input's element (and its focus) stable while
+            // bars and suggestion lists come and go above it.
+            for (final t in chat.pendingPermissions)
+              _PermissionBar(key: ValueKey('perm-${t.call.id}'), item: t, chat: chat),
+            if (_suggestions.isNotEmpty) KeyedSubtree(key: const ValueKey('suggest'), child: _suggestionList()),
+            KeyedSubtree(key: const ValueKey('input'), child: _inputBar(chat)),
           ],
         );
       },
@@ -216,24 +364,6 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
               icon: const Icon(Icons.unfold_more, size: 18),
               onPressed: () => _setAll(true),
             ),
-            PopupMenuButton<PermissionMode>(
-              tooltip: 'Permission mode',
-              icon: Icon(
-                switch (chat.permissionMode) {
-                  PermissionMode.normal => Icons.shield_outlined,
-                  PermissionMode.acceptEdits => Icons.edit_outlined,
-                  PermissionMode.plan => Icons.map_outlined,
-                  PermissionMode.bypassPermissions => Icons.bolt,
-                },
-                size: 18,
-                color: chat.permissionMode == PermissionMode.bypassPermissions ? AppColors.warn : AppColors.text,
-              ),
-              initialValue: chat.permissionMode,
-              onSelected: chat.setPermissionMode,
-              itemBuilder: (_) => [
-                for (final m in PermissionMode.values) PopupMenuItem(value: m, child: Text(m.label)),
-              ],
-            ),
             IconButton(
               tooltip: 'Restart with a new session',
               icon: const Icon(Icons.add_comment_outlined, size: 18),
@@ -271,13 +401,109 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
     );
   }
 
+  Widget _suggestionList() {
+    return Container(
+      color: AppColors.panelAlt,
+      constraints: const BoxConstraints(maxHeight: 220),
+      child: ListView(
+        shrinkWrap: true,
+        children: [
+          for (final c in _suggestions.take(8))
+            InkWell(
+              onTap: () {
+                _input.text = '/${c.name} ';
+                _input.selection = TextSelection.collapsed(offset: _input.text.length);
+                _focus.requestFocus();
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                child: Row(
+                  children: [
+                    Text('/${c.name}', style: const TextStyle(fontSize: 13, fontFamily: 'JetBrains Mono', fontFamilyFallback: monoFamilies, color: AppColors.accent)),
+                    const SizedBox(width: 12),
+                    Expanded(child: Text(c.help, style: const TextStyle(fontSize: 12, color: AppColors.textDim), overflow: TextOverflow.ellipsis)),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _modeRow(ClaudeChat chat) {
+    final m = chat.permissionMode;
+    final (icon, color) = switch (m) {
+      PermissionMode.normal => (Icons.shield_outlined, AppColors.textDim),
+      PermissionMode.acceptEdits => (Icons.edit_outlined, AppColors.ok),
+      PermissionMode.plan => (Icons.map_outlined, AppColors.accent),
+      PermissionMode.bypassPermissions => (Icons.bolt, AppColors.warn),
+    };
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          PopupMenuButton<PermissionMode>(
+            tooltip: 'Permission mode (Shift+Tab cycles)',
+            initialValue: m,
+            onSelected: chat.setPermissionMode,
+            itemBuilder: (_) => [
+              for (final x in PermissionMode.values)
+                PopupMenuItem(
+                  value: x,
+                  height: 36,
+                  child: Row(children: [
+                    Icon(x == m ? Icons.radio_button_checked : Icons.radio_button_off, size: 15, color: AppColors.accent),
+                    const SizedBox(width: 10),
+                    Text(x.label, style: const TextStyle(fontSize: 13)),
+                  ]),
+                ),
+            ],
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                border: Border.all(color: color.withValues(alpha: 0.6)),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(icon, size: 13, color: color),
+                const SizedBox(width: 5),
+                Text(m.label, style: TextStyle(fontSize: 11.5, color: color)),
+                const Icon(Icons.arrow_drop_down, size: 15, color: AppColors.textDim),
+              ]),
+            ),
+          ),
+          const SizedBox(width: 8),
+          InkWell(
+            onTap: () => _cmdModel(''),
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.memory, size: 13, color: AppColors.textDim),
+                const SizedBox(width: 5),
+                Text(chat.modelOverride ?? chat.model ?? 'default model', style: const TextStyle(fontSize: 11.5, color: AppColors.textDim)),
+              ]),
+            ),
+          ),
+          const Spacer(),
+          const Text('/ for commands', style: TextStyle(fontSize: 11, color: AppColors.textDim)),
+        ],
+      ),
+    );
+  }
+
   Widget _inputBar(ClaudeChat chat) {
     return Container(
       color: AppColors.panel,
       padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
       child: SafeArea(
         top: false,
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _modeRow(chat),
+            Row(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             Expanded(
@@ -285,6 +511,8 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
                 bindings: {
                   const SingleActivator(LogicalKeyboardKey.enter): _send,
                   const SingleActivator(LogicalKeyboardKey.numpadEnter): _send,
+                  const SingleActivator(LogicalKeyboardKey.tab): _completeSuggestion,
+                  const SingleActivator(LogicalKeyboardKey.tab, shift: true): _cycleMode,
                 },
                 child: TextField(
                   controller: _input,
@@ -305,6 +533,8 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
               IconButton.filledTonal(tooltip: 'Stop', icon: const Icon(Icons.stop), onPressed: chat.interrupt)
             else
               IconButton.filled(tooltip: 'Send', icon: const Icon(Icons.arrow_upward), onPressed: _send),
+          ],
+        ),
           ],
         ),
       ),
@@ -810,5 +1040,71 @@ class _ClaudeSessionListState extends ConsumerState<ClaudeSessionList> {
     if (d.inDays < 1) return '${d.inHours}h ago';
     if (d.inDays < 30) return '${d.inDays}d ago';
     return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
+  }
+}
+
+
+class _SlashCommand {
+  _SlashCommand(this.name, this.help, this.run);
+  final String name;
+  final String help;
+  final FutureOr<void> Function(String args) run;
+}
+
+/// A permission request, pinned above the input so it can never be hidden
+/// inside a collapsed block.
+class _PermissionBar extends StatelessWidget {
+  const _PermissionBar({super.key, required this.item, required this.chat});
+  final ToolCallItem item;
+  final ClaudeChat chat;
+
+  @override
+  Widget build(BuildContext context) {
+    final req = item.pendingPermission!;
+    final i = item.call.input;
+    final detail = switch (item.call.name) {
+      'Bash' => i['command'] as String? ?? '',
+      'Write' || 'Edit' || 'MultiEdit' || 'Read' || 'NotebookEdit' => i['file_path'] as String? ?? '',
+      'WebFetch' => i['url'] as String? ?? '',
+      _ => req.description ?? const JsonEncoder.withIndent('  ').convert(i),
+    };
+    return Container(
+      color: AppColors.warn.withValues(alpha: 0.12),
+      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.help_outline, size: 16, color: AppColors.warn),
+              const SizedBox(width: 8),
+              Text('Allow ${req.toolName}?', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.warn)),
+              const Spacer(),
+              TextButton(onPressed: () => chat.respondPermission(item, allow: false), child: const Text('Deny')),
+              const SizedBox(width: 4),
+              OutlinedButton(
+                onPressed: () => chat.setPermissionMode(PermissionMode.bypassPermissions),
+                child: const Text('Allow all (bypass)'),
+              ),
+              const SizedBox(width: 4),
+              FilledButton(onPressed: () => chat.respondPermission(item, allow: true), child: const Text('Allow')),
+            ],
+          ),
+          if (detail.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 96),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    detail.length > 600 ? '${detail.substring(0, 600)}…' : detail,
+                    style: const TextStyle(fontSize: 12, fontFamily: 'JetBrains Mono', fontFamilyFallback: monoFamilies),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }

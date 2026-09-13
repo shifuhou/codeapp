@@ -42,6 +42,13 @@ def type_text(s):
         if ks == 0:
             ks = ord(ch) | 0x01000000  # unicode keysym
         kc = d.keysym_to_keycode(ks)
+        # Prefer main-block keycodes over keypad ones (KP_Decimal etc.).
+        if kc >= 90:
+            for cand in range(8, 90):
+                m = d.get_keyboard_mapping(cand, 1)[0]
+                if ks in m[:2]:
+                    kc = cand
+                    break
         shift = False
         if kc == 0:
             # Temporarily map an unused keycode to this keysym.

@@ -38,6 +38,28 @@ class ClaudeChat extends ChangeNotifier {
   PermissionMode permissionMode = PermissionMode.normal;
   String? modelOverride;
 
+  /// Slash commands the CLI reported in its init message (custom commands
+  /// and the built-ins it supports in this mode).
+  List<String> cliSlashCommands = [];
+
+  /// Session totals accumulated from `result` messages.
+  double totalCostUsd = 0;
+  int totalInputTokens = 0;
+  int totalOutputTokens = 0;
+  int totalCacheReadTokens = 0;
+  int totalCacheWriteTokens = 0;
+  int totalDurationMs = 0;
+  int turnsCompleted = 0;
+
+  /// Context size of the last request (input + cache tokens).
+  int lastContextTokens = 0;
+
+  /// Permission requests waiting for an answer, oldest first.
+  List<ToolCallItem> get pendingPermissions =>
+      items.whereType<ToolCallItem>().where((t) => t.pendingPermission != null).toList();
+
+  final _pendingControl = <String, Completer<Map<String, dynamic>>>{};
+
   SSHSession? _session;
   StreamSubscription? _stdoutSub;
   StreamSubscription? _stderrSub;
@@ -91,6 +113,9 @@ class ClaudeChat extends ChangeNotifier {
       '--verbose',
       '--include-partial-messages',
       '--permission-prompt-tool', 'stdio',
+      // Lets a live session be switched to bypassPermissions later; the
+      // actual mode is still --permission-mode.
+      '--dangerously-skip-permissions',
       '--permission-mode', permissionMode.cliValue,
       if (resumeSessionId != null) ...['--resume', resumeSessionId],
       if (modelOverride != null && modelOverride!.isNotEmpty) ...[
@@ -180,16 +205,80 @@ class ClaudeChat extends ChangeNotifier {
     });
   }
 
-  /// Permission mode is a process flag, so changing it restarts the process
-  /// while keeping the same session.
+  /// Switch permission mode without restarting: the CLI accepts a
+  /// `set_permission_mode` control request mid-session. New processes get the
+  /// mode as a flag.
   Future<void> setPermissionMode(PermissionMode m) async {
     if (m == permissionMode) return;
+    final prev = permissionMode;
     permissionMode = m;
-    if (isRunning) {
-      await start(resumeSessionId: sessionId);
-    } else {
-      _notify();
+    _notify();
+    if (m == PermissionMode.bypassPermissions) {
+      // Anything already waiting is approved by the new mode.
+      for (final t in pendingPermissions) {
+        respondPermission(t, allow: true);
+      }
     }
+    if (!isRunning) return;
+    final r = await _control({'subtype': 'set_permission_mode', 'mode': m.cliValue});
+    if (r != null && r['subtype'] == 'error') {
+      if (m == PermissionMode.bypassPermissions) {
+        // The CLI refused, but the app answers every permission request
+        // itself, so bypass still works from this side.
+        items.add(SystemNoteItem('Permission mode: ${m.label} (approved by the app; CLI said: ${r['error']})'));
+      } else {
+        permissionMode = prev;
+        items.add(SystemNoteItem('Could not switch permission mode: ${r['error']}', isError: true));
+      }
+    } else {
+      items.add(SystemNoteItem('Permission mode: ${m.label}'));
+    }
+    _notify();
+  }
+
+  /// Switch model. Live sessions take a `set_model` control request; the
+  /// choice also applies to the next process start.
+  Future<void> setModel(String? modelId) async {
+    modelOverride = (modelId == null || modelId.isEmpty || modelId == 'default') ? null : modelId;
+    if (!isRunning) {
+      _notify();
+      return;
+    }
+    final r = await _control({'subtype': 'set_model', if (modelOverride != null) 'model': modelOverride});
+    if (r != null && r['subtype'] == 'error') {
+      items.add(SystemNoteItem('Could not switch model: ${r['error']}', isError: true));
+    } else {
+      model = modelOverride ?? model;
+      items.add(SystemNoteItem('Model: ${modelOverride ?? 'default'}'));
+    }
+    _notify();
+  }
+
+  /// Sends a control request and waits (briefly) for its response.
+  Future<Map<String, dynamic>?> _control(Map<String, dynamic> request) async {
+    if (!isRunning) return null;
+    final id = 'req-${DateTime.now().microsecondsSinceEpoch}';
+    final c = Completer<Map<String, dynamic>>();
+    _pendingControl[id] = c;
+    _write({'type': 'control_request', 'request_id': id, 'request': request});
+    try {
+      return await c.future.timeout(const Duration(seconds: 10));
+    } catch (_) {
+      return null;
+    } finally {
+      _pendingControl.remove(id);
+    }
+  }
+
+  /// Summary for `/usage`.
+  String usageSummary() {
+    String k(int n) => n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}k' : '$n';
+    return [
+      'Session ${sessionId?.substring(0, 8) ?? '(new)'} · model ${model ?? modelOverride ?? 'default'} · ${permissionMode.label}',
+      'Turns: $turnsCompleted · time ${(totalDurationMs / 1000).toStringAsFixed(0)}s · cost \$${totalCostUsd.toStringAsFixed(4)}',
+      'Tokens: in ${k(totalInputTokens)} · out ${k(totalOutputTokens)} · cache read ${k(totalCacheReadTokens)} · cache write ${k(totalCacheWriteTokens)}',
+      'Last request context: ${k(lastContextTokens)} tokens',
+    ].join('\n');
   }
 
   /// Ask the CLI to interrupt the current turn (like pressing Esc).
@@ -249,10 +338,13 @@ class ClaudeChat extends ChangeNotifier {
         _onUser(o['message'] as Map<String, dynamic>? ?? {});
       case 'control_request':
         _onControlRequest(o);
+      case 'control_response':
+        final r = (o['response'] as Map?)?.cast<String, dynamic>() ?? {};
+        _pendingControl[r['request_id']]?.complete(r);
       case 'result':
         _onResult(o);
       default:
-        break; // rate_limit_event, control_response, etc.
+        break; // rate_limit_event etc.
     }
     _notify();
   }
@@ -261,6 +353,12 @@ class ClaudeChat extends ChangeNotifier {
     if (o['subtype'] == 'init') {
       sessionId = o['session_id'] as String? ?? sessionId;
       model = o['model'] as String?;
+      final sc = o['slash_commands'];
+      if (sc is List) cliSlashCommands = sc.whereType<String>().toList();
+      final pm = o['permissionMode'] as String?;
+      if (pm != null) {
+        permissionMode = PermissionMode.values.firstWhere((m) => m.cliValue == pm, orElse: () => permissionMode);
+      }
     }
   }
 
@@ -364,6 +462,18 @@ class ClaudeChat extends ChangeNotifier {
     _streamingText = null;
     sessionId = o['session_id'] as String? ?? sessionId;
     final isError = o['is_error'] == true;
+    turnsCompleted++;
+    totalCostUsd = (o['total_cost_usd'] as num?)?.toDouble() ?? totalCostUsd;
+    totalDurationMs += (o['duration_ms'] as num?)?.toInt() ?? 0;
+    final u = (o['usage'] as Map?)?.cast<String, dynamic>();
+    if (u != null) {
+      int n(String key) => (u[key] as num?)?.toInt() ?? 0;
+      totalInputTokens += n('input_tokens');
+      totalOutputTokens += n('output_tokens');
+      totalCacheReadTokens += n('cache_read_input_tokens');
+      totalCacheWriteTokens += n('cache_creation_input_tokens');
+      lastContextTokens = n('input_tokens') + n('cache_read_input_tokens') + n('cache_creation_input_tokens');
+    }
     items.add(ResultItem(
       isError: isError,
       durationMs: (o['duration_ms'] as num?)?.toInt() ?? 0,
