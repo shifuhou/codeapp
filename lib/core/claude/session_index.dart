@@ -39,17 +39,20 @@ class ClaudeSessionIndex {
   Future<List<ClaudeSessionInfo>> list() async {
     // For each session file (newest first) print a header line and then
     // three probe lines: latest ai-title, first summary, first user message.
+    // -a: GNU grep would otherwise treat transcripts with odd bytes as binary
+    // and print nothing (its "binary file matches" note goes to stderr).
     final script = '''
+export LC_ALL=C
 d=${shq(projectDir)}
 [ -d "\$d" ] || exit 0
 cd "\$d"
 for f in \$(ls -t *.jsonl 2>/dev/null); do
   echo "@@FILE \${f%.jsonl} \$(stat -c '%Y %s' "\$f" 2>/dev/null || stat -f '%m %z' "\$f")"
-  grep '"type":"ai-title"' "\$f" 2>/dev/null | tail -n1 | head -c 2000
+  grep -a '"type":"ai-title"' "\$f" 2>/dev/null | tail -n1 | head -c 2000
   echo
-  grep -m1 '"type":"summary"' "\$f" 2>/dev/null | head -c 2000
+  grep -a -m1 '"type":"summary"' "\$f" 2>/dev/null | head -c 2000
   echo
-  grep -m1 '"type":"user"' "\$f" 2>/dev/null | head -c 6000
+  grep -a -m1 '"type":"user"' "\$f" 2>/dev/null | head -c 6000
   echo
 done
 ''';

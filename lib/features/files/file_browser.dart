@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app.dart';
 import '../../core/ssh/ssh_connection.dart';
 import '../../core/workspace_session.dart';
+import '../workspace/context_menu.dart';
 
 class FileBrowser extends ConsumerStatefulWidget {
   const FileBrowser({super.key, this.onOpenFile});
@@ -87,54 +88,71 @@ class _FileBrowserState extends ConsumerState<FileBrowser> {
     );
   }
 
-  Future<void> _entryMenu(SftpName e) async {
+  List<MenuAction> _entryMenu(SftpName e) {
     final path = _join(e.filename);
-    final action = await showModalBottomSheet<String>(
+    final ws = ref.read(workspaceProvider);
+    final rel = path.startsWith('${ws.workDir}/') ? path.substring(ws.workDir.length + 1) : path;
+    return [
+      if (e.attr.isDirectory)
+        MenuAction('Open', () => _load(path), icon: Icons.folder_open)
+      else
+        MenuAction('Open', () => _openFile(path), icon: Icons.insert_drive_file_outlined),
+      MenuAction('Open in terminal', () => ws.runInTerminal?.call('cd ${shq(e.attr.isDirectory ? path : _dir!)}'),
+          icon: Icons.terminal, enabled: ws.runInTerminal != null),
+      menuDivider,
+      MenuAction('New file…', () => _create(folder: false), icon: Icons.note_add_outlined),
+      MenuAction('New folder…', () => _create(folder: true), icon: Icons.create_new_folder_outlined),
+      menuDivider,
+      MenuAction('Copy path', () => Clipboard.setData(ClipboardData(text: path)), icon: Icons.copy),
+      MenuAction('Copy relative path', () => Clipboard.setData(ClipboardData(text: rel))),
+      menuDivider,
+      MenuAction('Rename…', () => _rename(e), icon: Icons.drive_file_rename_outline, shortcut: 'F2'),
+      MenuAction('Delete', () => _delete(e), icon: Icons.delete_outline, danger: true),
+    ];
+  }
+
+  List<MenuAction> _blankMenu() => [
+        MenuAction('New file…', () => _create(folder: false), icon: Icons.note_add_outlined),
+        MenuAction('New folder…', () => _create(folder: true), icon: Icons.create_new_folder_outlined),
+        menuDivider,
+        MenuAction('Open in terminal', () => ref.read(workspaceProvider).runInTerminal?.call('cd ${shq(_dir ?? '')}'),
+            icon: Icons.terminal),
+        MenuAction('Copy path', () => Clipboard.setData(ClipboardData(text: _dir ?? '')), icon: Icons.copy),
+        MenuAction('Refresh', () => _load(_dir!), icon: Icons.refresh),
+      ];
+
+  Future<void> _rename(SftpName e) async {
+    final path = _join(e.filename);
+    final n = await _prompt('Rename', initial: e.filename);
+    if (n == null || n.isEmpty || n == e.filename) return;
+    try {
+      await (await ref.read(workspaceProvider).conn.sftp()).rename(path, _join(n));
+      _load(_dir!);
+    } catch (err) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$err')));
+    }
+  }
+
+  Future<void> _delete(SftpName e) async {
+    final path = _join(e.filename);
+    final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(title: Text(e.filename, style: const TextStyle(fontWeight: FontWeight.bold))),
-            ListTile(leading: const Icon(Icons.drive_file_rename_outline), title: const Text('Rename'), onTap: () => Navigator.pop(ctx, 'rename')),
-            ListTile(leading: const Icon(Icons.delete_outline), title: const Text('Delete'), onTap: () => Navigator.pop(ctx, 'delete')),
-            ListTile(leading: const Icon(Icons.copy), title: const Text('Copy path'), onTap: () => Navigator.pop(ctx, 'copy')),
-          ],
-        ),
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete ${e.filename}?'),
+        content: e.attr.isDirectory ? const Text('The folder and everything in it will be removed.') : null,
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete')),
+        ],
       ),
     );
-    if (action == null || !mounted) return;
+    if (ok != true) return;
     final conn = ref.read(workspaceProvider).conn;
     try {
-      switch (action) {
-        case 'rename':
-          final n = await _prompt('Rename', initial: e.filename);
-          if (n == null || n.isEmpty || n == e.filename) return;
-          await (await conn.sftp()).rename(path, _join(n));
-        case 'delete':
-          final ok = await showDialog<bool>(
-            context: context,
-            builder: (ctx) => AlertDialog(
-              title: Text('Delete ${e.filename}?'),
-              content: e.attr.isDirectory ? const Text('The folder and everything in it will be removed.') : null,
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-                FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete')),
-              ],
-            ),
-          );
-          if (ok != true) return;
-          if (e.attr.isDirectory) {
-            await conn.run('rm -rf ${shq(path)}');
-          } else {
-            await (await conn.sftp()).remove(path);
-          }
-        case 'copy':
-          await Clipboard.setData(ClipboardData(text: path));
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Copied $path')));
-          }
-          return;
+      if (e.attr.isDirectory) {
+        await conn.run('rm -rf ${shq(path)}');
+      } else {
+        await (await conn.sftp()).remove(path);
       }
       _load(_dir!);
     } catch (err) {
@@ -215,7 +233,10 @@ class _FileBrowserState extends ConsumerState<FileBrowser> {
               ? const Center(child: CircularProgressIndicator())
               : _error != null
                   ? Center(child: Padding(padding: const EdgeInsets.all(16), child: Text(_error!, style: const TextStyle(color: AppColors.err))))
-                  : RefreshIndicator(
+                  : ContextMenuRegion(
+                      longPress: false,
+                      actions: _blankMenu,
+                      child: RefreshIndicator(
                       onRefresh: () => _load(dir),
                       child: ListView.builder(
                         itemCount: (_entries?.length ?? 0) + (dir == '/' ? 0 : 1),
@@ -229,7 +250,9 @@ class _FileBrowserState extends ConsumerState<FileBrowser> {
                           }
                           final e = _entries![dir == '/' ? i : i - 1];
                           final isDir = e.attr.isDirectory;
-                          return ListTile(
+                          return ContextMenuRegion(
+                            actions: () => _entryMenu(e),
+                            child: ListTile(
                             leading: Icon(
                               isDir ? Icons.folder : _iconFor(e.filename),
                               size: 18,
@@ -238,10 +261,11 @@ class _FileBrowserState extends ConsumerState<FileBrowser> {
                             title: Text(e.filename, overflow: TextOverflow.ellipsis),
                             trailing: isDir ? null : Text(_size(e.attr.size), style: const TextStyle(fontSize: 11, color: AppColors.textDim)),
                             onTap: () => isDir ? _load(_join(e.filename)) : _openFile(_join(e.filename)),
-                            onLongPress: () => _entryMenu(e),
+                          ),
                           );
                         },
                       ),
+                    ),
                     ),
         ),
       ],

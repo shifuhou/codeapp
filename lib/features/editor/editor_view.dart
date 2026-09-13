@@ -6,6 +6,7 @@ import 'package:re_editor/re_editor.dart';
 import '../../app.dart';
 import '../../core/workspace_session.dart';
 import '../claude/claude_panel.dart';
+import '../workspace/context_menu.dart';
 import 'editor_state.dart';
 import 'languages.dart';
 
@@ -85,7 +86,10 @@ class _TabStrip extends StatelessWidget {
                   final dirty = tab is FileTab && tab.file.dirty;
                   final busy = tab is ClaudeTab && tab.chat.busy;
                   final needsAttention = tab is ClaudeTab && tab.chat.pendingPermissionCount > 0;
-                  return InkWell(
+                  return ContextMenuRegion(
+                    longPress: false,
+                    actions: () => _tabMenu(context, tab),
+                    child: InkWell(
                     onTap: () => editor.activate(i),
                     child: Container(
                       padding: const EdgeInsets.only(left: 10, right: 2),
@@ -132,6 +136,7 @@ class _TabStrip extends StatelessWidget {
                         ],
                       ),
                     ),
+                  ),
                   );
                 },
               ),
@@ -155,6 +160,30 @@ class _TabStrip extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  List<MenuAction> _tabMenu(BuildContext context, WorkspaceTab tab) {
+    final others = editor.tabs.where((t) => t != tab).toList();
+    return [
+      MenuAction('Close', () => _close(context, tab), icon: Icons.close, shortcut: 'Ctrl+W'),
+      MenuAction('Close others', () { for (final t in others) { _close(context, t); } }, enabled: others.isNotEmpty),
+      MenuAction('Close all', () { for (final t in editor.tabs.toList()) { _close(context, t); } }),
+      MenuAction('Close saved', () {
+        for (final t in editor.tabs.toList()) {
+          if (t is FileTab && !t.file.dirty) editor.close(t);
+        }
+      }),
+      if (tab is FileTab) ...[
+        menuDivider,
+        MenuAction('Copy path', () => Clipboard.setData(ClipboardData(text: tab.file.path)), icon: Icons.copy),
+        MenuAction('Save', () => _save(context, tab.file), icon: Icons.save_outlined, shortcut: 'Ctrl+S', enabled: tab.file.dirty),
+      ],
+      if (tab is ClaudeTab) ...[
+        menuDivider,
+        MenuAction('Copy session id', () => Clipboard.setData(ClipboardData(text: tab.chat.sessionId ?? '')),
+            icon: Icons.copy, enabled: tab.chat.sessionId != null),
+      ],
+    ];
   }
 
   Future<void> _save(BuildContext context, OpenFile f) async {
@@ -217,6 +246,7 @@ class _Editor extends StatelessWidget {
       },
       child: CodeEditor(
         controller: file.controller,
+        toolbarController: _EditorContextMenu(onSave: () => editor.save(file)),
         wordWrap: false,
         style: CodeEditorStyle(
           fontSize: 13,
@@ -243,5 +273,38 @@ class _Editor extends StatelessWidget {
         },
       ),
     );
+  }
+}
+
+
+/// Right-click / long-press menu inside the code editor.
+class _EditorContextMenu implements SelectionToolbarController {
+  const _EditorContextMenu({required this.onSave});
+  final VoidCallback onSave;
+
+  @override
+  void hide(BuildContext context) {}
+
+  @override
+  void show({
+    required BuildContext context,
+    required CodeLineEditingController controller,
+    required TextSelectionToolbarAnchors anchors,
+    Rect? renderRect,
+    required LayerLink layerLink,
+    required ValueNotifier<bool> visibility,
+  }) {
+    final hasSelection = !controller.selection.isCollapsed;
+    showContextMenu(context, anchors.primaryAnchor, [
+      MenuAction('Cut', controller.cut, icon: Icons.content_cut, shortcut: 'Ctrl+X', enabled: hasSelection),
+      MenuAction('Copy', controller.copy, icon: Icons.copy, shortcut: 'Ctrl+C', enabled: hasSelection),
+      MenuAction('Paste', controller.paste, icon: Icons.paste, shortcut: 'Ctrl+V'),
+      MenuAction('Select all', controller.selectAll, icon: Icons.select_all, shortcut: 'Ctrl+A'),
+      menuDivider,
+      MenuAction('Undo', controller.undo, icon: Icons.undo, shortcut: 'Ctrl+Z'),
+      MenuAction('Redo', controller.redo, icon: Icons.redo, shortcut: 'Ctrl+Y'),
+      menuDivider,
+      MenuAction('Save', onSave, icon: Icons.save_outlined, shortcut: 'Ctrl+S'),
+    ]);
   }
 }

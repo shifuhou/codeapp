@@ -10,6 +10,7 @@ import '../../core/claude/claude_chat.dart';
 import '../../core/claude/claude_protocol.dart';
 import '../../core/claude/session_index.dart';
 import '../../core/workspace_session.dart';
+import '../workspace/context_menu.dart';
 
 /// One Claude chat, shown as an editor tab.
 class ClaudePanel extends ConsumerStatefulWidget {
@@ -26,9 +27,10 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
   final _focus = FocusNode();
   int _lastCount = 0;
 
-  /// Per-turn expand/collapse overrides (turn index -> expanded).
+  /// Per-turn expand/collapse overrides (turn index -> expanded); a global
+  /// default set by collapse-all / expand-all.
   final Map<int, bool> _turnOverride = {};
-  bool? _allOverride; // set by "collapse all" / "expand all"
+  bool? _allOverride;
 
   @override
   void dispose() {
@@ -46,13 +48,21 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
     _focus.requestFocus();
   }
 
+  bool _scrolledOnce = false;
+
   void _autoScroll(ClaudeChat chat) {
     if (chat.items.length != _lastCount || chat.busy) {
+      final firstFill = !_scrolledOnce && chat.items.isNotEmpty;
       _lastCount = chat.items.length;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!_scroll.hasClients) return;
         final max = _scroll.position.maxScrollExtent;
-        if (max - _scroll.offset < 400) _scroll.jumpTo(max);
+        // Always land at the bottom when history first appears; afterwards
+        // only follow if the user is already near the bottom.
+        if (firstFill || max - _scroll.offset < 400) {
+          _scroll.jumpTo(max);
+          _scrolledOnce = true;
+        }
       });
     }
   }
@@ -78,6 +88,40 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
     }
   }
 
+  // ---- turns ---------------------------------------------------------------
+
+  /// Groups the timeline into turns: your message followed by everything
+  /// Claude did in response.
+  static List<_Turn> _turns(ClaudeChat chat) {
+    final turns = <_Turn>[];
+    var i = 0;
+    for (final item in chat.items) {
+      if (item is UserItem || turns.isEmpty) {
+        turns.add(_Turn(item is UserItem ? item : null, i < chat.historyItemCount));
+      }
+      if (item is! UserItem) turns.last.body.add(item);
+      i++;
+    }
+    return turns;
+  }
+
+  bool _isExpanded(int index, int count, _Turn t, ClaudeChat chat) {
+    final o = _turnOverride[index];
+    if (o != null) return o;
+    // The turn Claude is working on right now is always open, so new output
+    // never lands in a collapsed block.
+    if (index == count - 1 && chat.busy) return true;
+    if (_allOverride != null) return _allOverride!;
+    // Older history turns start collapsed so your own prompts are easy to
+    // find; the latest turn and live turns start open.
+    return index == count - 1 || !t.fromHistory;
+  }
+
+  void _setAll(bool expanded) => setState(() {
+        _turnOverride.clear();
+        _allOverride = expanded;
+      });
+
   @override
   Widget build(BuildContext context) {
     final chat = widget.chat;
@@ -93,8 +137,8 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
               child: chat.loadingHistory && chat.items.isEmpty
                   ? const Center(child: CircularProgressIndicator())
                   : chat.items.isEmpty
-                  ? _emptyState(chat)
-                  : _turnList(chat),
+                      ? _emptyState(chat)
+                      : _turnList(chat),
             ),
             if (chat.busy) const LinearProgressIndicator(minHeight: 2),
             _inputBar(chat),
@@ -104,51 +148,27 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
     );
   }
 
-  /// Groups the timeline into turns: each user message followed by
-  /// everything Claude did in response.
-  static List<_Turn> _turns(ClaudeChat chat) {
-    final turns = <_Turn>[];
-    var i = 0;
-    for (final item in chat.items) {
-      if (item is UserItem || turns.isEmpty) {
-        turns.add(_Turn(item is UserItem ? item : null, i < chat.historyItemCount));
-      }
-      if (item is! UserItem) turns.last.body.add(item);
-      i++;
-    }
-    return turns;
-  }
-
-  bool _isExpanded(int index, int count, _Turn t) {
-    final o = _turnOverride[index];
-    if (o != null) return o;
-    if (_allOverride != null) return _allOverride!;
-    // History turns start collapsed so your own prompts are easy to find;
-    // the latest turn and live turns start open.
-    return index == count - 1 || !t.fromHistory;
-  }
-
   Widget _turnList(ClaudeChat chat) {
     final turns = _turns(chat);
     return ListView.builder(
       controller: _scroll,
-      padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
       itemCount: turns.length,
       itemBuilder: (context, i) {
         final t = turns[i];
-        final expanded = _isExpanded(i, turns.length, t);
+        final expanded = _isExpanded(i, turns.length, t, chat);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (t.user != null)
-              _TurnHeader(
+            if (t.user != null) _UserBubble(text: t.user!.text, first: i == 0),
+            if (t.body.isNotEmpty)
+              _ResponseBlock(
                 turn: t,
-                index: i,
+                chat: chat,
                 expanded: expanded,
+                live: i == turns.length - 1 && chat.busy,
                 onToggle: () => setState(() => _turnOverride[i] = !expanded),
               ),
-            if (expanded)
-              for (final item in t.body) _ItemView(item: item, chat: chat),
           ],
         );
       },
@@ -187,20 +207,14 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
               ),
             ),
             IconButton(
-              tooltip: 'Collapse all turns',
+              tooltip: 'Collapse all responses',
               icon: const Icon(Icons.unfold_less, size: 18),
-              onPressed: () => setState(() {
-                _turnOverride.clear();
-                _allOverride = false;
-              }),
+              onPressed: () => _setAll(false),
             ),
             IconButton(
-              tooltip: 'Expand all turns',
+              tooltip: 'Expand all responses',
               icon: const Icon(Icons.unfold_more, size: 18),
-              onPressed: () => setState(() {
-                _turnOverride.clear();
-                _allOverride = true;
-              }),
+              onPressed: () => _setAll(true),
             ),
             PopupMenuButton<PermissionMode>(
               tooltip: 'Permission mode',
@@ -217,12 +231,11 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
               initialValue: chat.permissionMode,
               onSelected: chat.setPermissionMode,
               itemBuilder: (_) => [
-                for (final m in PermissionMode.values)
-                  PopupMenuItem(value: m, child: Text(m.label)),
+                for (final m in PermissionMode.values) PopupMenuItem(value: m, child: Text(m.label)),
               ],
             ),
             IconButton(
-              tooltip: 'New session',
+              tooltip: 'Restart with a new session',
               icon: const Icon(Icons.add_comment_outlined, size: 18),
               onPressed: () => chat.start(),
             ),
@@ -289,17 +302,9 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
             ),
             const SizedBox(width: 6),
             if (chat.busy)
-              IconButton.filledTonal(
-                tooltip: 'Stop',
-                icon: const Icon(Icons.stop),
-                onPressed: chat.interrupt,
-              )
+              IconButton.filledTonal(tooltip: 'Stop', icon: const Icon(Icons.stop), onPressed: chat.interrupt)
             else
-              IconButton.filled(
-                tooltip: 'Send',
-                icon: const Icon(Icons.arrow_upward),
-                onPressed: _send,
-              ),
+              IconButton.filled(tooltip: 'Send', icon: const Icon(Icons.arrow_upward), onPressed: _send),
           ],
         ),
       ),
@@ -309,6 +314,168 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
 
 // ---------------------------------------------------------------------------
 
+class _Turn {
+  _Turn(this.user, this.fromHistory);
+  final UserItem? user;
+  final bool fromHistory;
+  final List<ChatItem> body = [];
+
+  int get toolCount => body.whereType<ToolCallItem>().length;
+  int get textCount => body.whereType<AssistantTextItem>().length;
+  bool get hasPendingPermission => body.whereType<ToolCallItem>().any((t) => t.pendingPermission != null);
+  bool get hasError =>
+      body.any((i) => (i is SystemNoteItem && i.isError) || (i is ResultItem && i.isError));
+
+  /// Last thing Claude said in this turn, for the collapsed preview.
+  String get preview {
+    for (final item in body.reversed) {
+      if (item is AssistantTextItem && item.text.trim().isNotEmpty) {
+        return item.text.trim().split('\n').first;
+      }
+    }
+    return '';
+  }
+
+  /// Everything Claude said in this turn, for "copy response".
+  String get responseText =>
+      body.whereType<AssistantTextItem>().map((t) => t.text).join('\n\n');
+}
+
+/// Your message. Never collapses, so it is always easy to find.
+class _UserBubble extends StatelessWidget {
+  const _UserBubble({required this.text, required this.first});
+  final String text;
+  final bool first;
+
+  @override
+  Widget build(BuildContext context) {
+    return ContextMenuRegion(
+      longPress: false,
+      actions: () => [
+        MenuAction('Copy message', () => Clipboard.setData(ClipboardData(text: text)), icon: Icons.copy),
+      ],
+      child: Container(
+        margin: EdgeInsets.only(top: first ? 0 : 18, bottom: 6),
+        padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
+        decoration: BoxDecoration(
+          color: AppColors.accentDim.withValues(alpha: 0.45),
+          borderRadius: BorderRadius.circular(8),
+          border: const Border(left: BorderSide(color: AppColors.accent, width: 3)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(top: 2, right: 8),
+              child: Icon(Icons.person_outline, size: 16, color: AppColors.accent),
+            ),
+            Expanded(child: SelectableText(text, style: const TextStyle(fontSize: 14, height: 1.4))),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Everything Claude did in response to one message, behind a header bar
+/// that collapses the whole block.
+class _ResponseBlock extends StatelessWidget {
+  const _ResponseBlock({
+    required this.turn,
+    required this.chat,
+    required this.expanded,
+    required this.live,
+    required this.onToggle,
+  });
+  final _Turn turn;
+  final ClaudeChat chat;
+  final bool expanded;
+  final bool live;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final summary = [
+      if (turn.toolCount > 0) '${turn.toolCount} tool call${turn.toolCount == 1 ? '' : 's'}',
+      if (turn.textCount > 0) '${turn.textCount} message${turn.textCount == 1 ? '' : 's'}',
+    ].join(' · ');
+    final preview = turn.preview;
+    final header = ContextMenuRegion(
+      longPress: false,
+      actions: () => [
+        MenuAction(expanded ? 'Collapse response' : 'Expand response', onToggle, icon: expanded ? Icons.unfold_less : Icons.unfold_more),
+        MenuAction('Copy response text', () => Clipboard.setData(ClipboardData(text: turn.responseText)),
+            icon: Icons.copy, enabled: turn.responseText.isNotEmpty),
+      ],
+      child: InkWell(
+        onTap: onToggle,
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
+          child: Row(
+            children: [
+              Icon(expanded ? Icons.expand_more : Icons.chevron_right, size: 18, color: AppColors.textDim),
+              const SizedBox(width: 4),
+              const Icon(Icons.auto_awesome, size: 14, color: AppColors.accent),
+              const SizedBox(width: 8),
+              Text('Claude', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.text)),
+              if (summary.isNotEmpty) ...[
+                const SizedBox(width: 10),
+                Text(summary, style: const TextStyle(fontSize: 12, color: AppColors.textDim)),
+              ],
+              if (live) ...[
+                const SizedBox(width: 10),
+                const SizedBox(width: 11, height: 11, child: CircularProgressIndicator(strokeWidth: 1.5)),
+              ],
+              if (turn.hasPendingPermission) ...[
+                const SizedBox(width: 10),
+                const Icon(Icons.help_outline, size: 15, color: AppColors.warn),
+                const Text(' needs approval', style: TextStyle(fontSize: 12, color: AppColors.warn)),
+              ],
+              if (turn.hasError) ...[
+                const SizedBox(width: 10),
+                const Icon(Icons.error_outline, size: 15, color: AppColors.err),
+              ],
+              const Spacer(),
+              if (!expanded && preview.isNotEmpty)
+                Flexible(
+                  flex: 3,
+                  child: Text(preview, maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12, color: AppColors.textDim), textAlign: TextAlign.right),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      decoration: BoxDecoration(
+        color: expanded ? Colors.transparent : AppColors.panel,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          header,
+          if (expanded) ...[
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 4, 10, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [for (final item in turn.body) _ItemView(item: item, chat: chat)],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 class _ItemView extends StatelessWidget {
   const _ItemView({required this.item, required this.chat});
   final ChatItem item;
@@ -317,19 +484,18 @@ class _ItemView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return switch (item) {
-      UserItem u => _bubble(
-          align: Alignment.centerLeft,
-          color: AppColors.accentDim,
-          child: SelectableText(u.text, style: const TextStyle(fontSize: 14)),
-        ),
-      AssistantTextItem a => Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          child: _Markdown(a.text),
+      UserItem u => _UserBubble(text: u.text, first: true),
+      AssistantTextItem a => ContextMenuRegion(
+          longPress: false,
+          actions: () => [
+            MenuAction('Copy message', () => Clipboard.setData(ClipboardData(text: a.text)), icon: Icons.copy),
+          ],
+          child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: _Markdown(a.text)),
         ),
       ThinkingItem t => _Collapsible(
           icon: Icons.psychology_outlined,
           title: 'Thinking',
-          child: Text(t.text, style: const TextStyle(fontSize: 12, color: AppColors.textDim, fontStyle: FontStyle.italic)),
+          child: SelectableText(t.text, style: const TextStyle(fontSize: 12, color: AppColors.textDim, fontStyle: FontStyle.italic)),
         ),
       ToolCallItem t => _ToolCallView(item: t, chat: chat),
       SystemNoteItem s => Padding(
@@ -345,19 +511,6 @@ class _ItemView extends StatelessWidget {
           ),
         ),
     };
-  }
-
-  Widget _bubble({required Alignment align, required Color color, required Widget child}) {
-    return Align(
-      alignment: align,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        constraints: const BoxConstraints(maxWidth: 520),
-        decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)),
-        child: child,
-      ),
-    );
   }
 }
 
@@ -426,11 +579,7 @@ class _CollapsibleState extends State<_Collapsible> {
               ),
             ),
           ),
-          if (_open)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-              child: widget.child,
-            ),
+          if (_open) Padding(padding: const EdgeInsets.fromLTRB(10, 0, 10, 10), child: widget.child),
         ],
       ),
     );
@@ -467,42 +616,42 @@ class _ToolCallView extends StatelessWidget {
                 : const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5)))
             : Icon(res.isError ? Icons.error_outline : Icons.check, size: 15, color: res.isError ? AppColors.err : AppColors.ok);
 
-    return _Collapsible(
-      icon: Icons.build_outlined,
-      title: '${item.call.name}  ${_summary()}',
-      trailing: Padding(padding: const EdgeInsets.only(right: 6), child: status),
-      initiallyOpen: pending != null,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _code(_formatInput(item.call)),
-          if (pending != null) ...[
-            const SizedBox(height: 8),
-            Text(
-              'Claude wants to use ${pending.toolName}. Allow?',
-              style: const TextStyle(fontSize: 12.5, color: AppColors.warn),
-            ),
-            const SizedBox(height: 6),
-            Row(
-              children: [
-                FilledButton(
-                  onPressed: () => chat.respondPermission(item, allow: true),
-                  child: const Text('Allow'),
-                ),
-                const SizedBox(width: 8),
-                OutlinedButton(
-                  onPressed: () => chat.respondPermission(item, allow: false),
-                  child: const Text('Deny'),
-                ),
-              ],
-            ),
+    final input = _formatInput(item.call);
+    return ContextMenuRegion(
+      longPress: false,
+      actions: () => [
+        MenuAction('Copy tool input', () => Clipboard.setData(ClipboardData(text: input)), icon: Icons.copy),
+        MenuAction('Copy tool output', () => Clipboard.setData(ClipboardData(text: res?.content ?? '')),
+            icon: Icons.copy, enabled: res != null),
+      ],
+      child: _Collapsible(
+        icon: Icons.build_outlined,
+        title: '${item.call.name}  ${_summary()}',
+        trailing: Padding(padding: const EdgeInsets.only(right: 6), child: status),
+        initiallyOpen: pending != null,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _code(input),
+            if (pending != null) ...[
+              const SizedBox(height: 8),
+              Text('Claude wants to use ${pending.toolName}. Allow?', style: const TextStyle(fontSize: 12.5, color: AppColors.warn)),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  FilledButton(onPressed: () => chat.respondPermission(item, allow: true), child: const Text('Allow')),
+                  const SizedBox(width: 8),
+                  OutlinedButton(onPressed: () => chat.respondPermission(item, allow: false), child: const Text('Deny')),
+                ],
+              ),
+            ],
+            if (res != null && res.content.trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              _code(res.content.length > 3000 ? '${res.content.substring(0, 3000)}\n… (${res.content.length} chars)' : res.content,
+                  error: res.isError),
+            ],
           ],
-          if (res != null && res.content.trim().isNotEmpty) ...[
-            const SizedBox(height: 6),
-            _code(res.content.length > 3000 ? '${res.content.substring(0, 3000)}\n… (${res.content.length} chars)' : res.content,
-                error: res.isError),
-          ],
-        ],
+        ),
       ),
     );
   }
@@ -529,12 +678,7 @@ class _ToolCallView extends StatelessWidget {
       decoration: BoxDecoration(color: AppColors.bg, borderRadius: BorderRadius.circular(4)),
       child: SelectableText(
         text,
-        style: TextStyle(
-          fontSize: 11.5,
-          fontFamily: 'JetBrains Mono',
-          fontFamilyFallback: monoFamilies,
-          color: error ? AppColors.err : AppColors.text,
-        ),
+        style: TextStyle(fontSize: 11.5, fontFamily: 'JetBrains Mono', fontFamilyFallback: monoFamilies, color: error ? AppColors.err : AppColors.text),
       ),
     );
   }
@@ -585,6 +729,32 @@ class _ClaudeSessionListState extends ConsumerState<ClaudeSessionList> {
     }
   }
 
+  Future<void> _delete(ClaudeSessionInfo s) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Delete this session?'),
+        content: Text(s.title),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await ref.read(workspaceProvider).sessions.delete(s.id);
+      _load();
+    }
+  }
+
+  List<MenuAction> _menu(ClaudeSessionInfo s) => [
+        MenuAction('Open', () => _choose(s.id, title: _shortTitle(s.title)), icon: Icons.open_in_new),
+        MenuAction('Copy session id', () => Clipboard.setData(ClipboardData(text: s.id)), icon: Icons.copy),
+        MenuAction('Copy resume command', () => Clipboard.setData(ClipboardData(text: 'claude --resume ${s.id}')), icon: Icons.terminal),
+        menuDivider,
+        MenuAction('Delete session', () => _delete(s), icon: Icons.delete_outline, danger: true),
+      ];
+
   @override
   Widget build(BuildContext context) {
     final editor = ref.watch(workspaceProvider).editor;
@@ -611,37 +781,17 @@ class _ClaudeSessionListState extends ConsumerState<ClaudeSessionList> {
                             itemBuilder: (context, i) {
                               final s = _sessions![i];
                               final current = editor.chats.any((c) => c.sessionId == s.id);
-                              return ListTile(
-                                selected: current,
-                                selectedTileColor: AppColors.accentDim.withValues(alpha: 0.4),
-                                leading: Icon(Icons.chat_bubble_outline, size: 18, color: current ? AppColors.accent : AppColors.textDim),
-                                title: Text(s.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
-                                subtitle: Text(
-                                  '${_ago(s.modified)} • ${s.id.substring(0, 8)}',
-                                  style: const TextStyle(fontSize: 11, color: AppColors.textDim),
+                              return ContextMenuRegion(
+                                actions: () => _menu(s),
+                                child: ListTile(
+                                  selected: current,
+                                  selectedTileColor: AppColors.accentDim.withValues(alpha: 0.4),
+                                  leading: Icon(Icons.chat_bubble_outline, size: 18, color: current ? AppColors.accent : AppColors.textDim),
+                                  title: Text(s.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+                                  subtitle: Text('${_ago(s.modified)} • ${s.id.substring(0, 8)}',
+                                      style: const TextStyle(fontSize: 11, color: AppColors.textDim)),
+                                  onTap: () => _choose(s.id, title: _shortTitle(s.title)),
                                 ),
-                                trailing: IconButton(
-                                  icon: const Icon(Icons.delete_outline, size: 18),
-                                  tooltip: 'Delete session',
-                                  onPressed: () async {
-                                    final ok = await showDialog<bool>(
-                                      context: context,
-                                      builder: (c) => AlertDialog(
-                                        title: const Text('Delete this session?'),
-                                        content: Text(s.title),
-                                        actions: [
-                                          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
-                                          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Delete')),
-                                        ],
-                                      ),
-                                    );
-                                    if (ok == true) {
-                                      await ref.read(workspaceProvider).sessions.delete(s.id);
-                                      _load();
-                                    }
-                                  },
-                                ),
-                                onTap: () => _choose(s.id, title: _shortTitle(s.title)),
                               );
                             },
                           ),
@@ -660,100 +810,5 @@ class _ClaudeSessionListState extends ConsumerState<ClaudeSessionList> {
     if (d.inDays < 1) return '${d.inHours}h ago';
     if (d.inDays < 30) return '${d.inDays}d ago';
     return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
-  }
-}
-
-class _Turn {
-  _Turn(this.user, this.fromHistory);
-  final UserItem? user;
-  final bool fromHistory;
-  final List<ChatItem> body = [];
-
-  int get toolCount => body.whereType<ToolCallItem>().length;
-  bool get hasPendingPermission =>
-      body.whereType<ToolCallItem>().any((t) => t.pendingPermission != null);
-
-  /// Last thing Claude said in this turn, for the collapsed preview.
-  String get preview {
-    for (final item in body.reversed) {
-      if (item is AssistantTextItem && item.text.trim().isNotEmpty) {
-        return item.text.trim().split('\n').first;
-      }
-    }
-    return '';
-  }
-}
-
-/// Your prompt as a prominent, clickable header. Tapping collapses or
-/// expands everything Claude did in response.
-class _TurnHeader extends StatelessWidget {
-  const _TurnHeader({
-    required this.turn,
-    required this.index,
-    required this.expanded,
-    required this.onToggle,
-  });
-  final _Turn turn;
-  final int index;
-  final bool expanded;
-  final VoidCallback onToggle;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = turn.user!.text;
-    final preview = turn.preview;
-    return Container(
-      margin: EdgeInsets.only(top: index == 0 ? 0 : 14, bottom: 6),
-      decoration: BoxDecoration(
-        color: AppColors.accentDim.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(8),
-        border: const Border(left: BorderSide(color: AppColors.accent, width: 3)),
-      ),
-      child: InkWell(
-        onTap: onToggle,
-        borderRadius: BorderRadius.circular(8),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Padding(
-                padding: EdgeInsets.only(top: 2, right: 8),
-                child: Icon(Icons.person_outline, size: 16, color: AppColors.accent),
-              ),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    expanded
-                        ? SelectableText(text, style: const TextStyle(fontSize: 14, height: 1.4))
-                        : Text(text, maxLines: 3, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14, height: 1.4)),
-                    if (!expanded && turn.body.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Text(
-                          [
-                            if (turn.toolCount > 0) '${turn.toolCount} tool call${turn.toolCount == 1 ? '' : 's'}',
-                            if (preview.isNotEmpty) preview,
-                          ].join('  ·  '),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 12, color: AppColors.textDim),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              if (turn.hasPendingPermission)
-                const Padding(
-                  padding: EdgeInsets.only(right: 6, top: 2),
-                  child: Icon(Icons.help_outline, size: 16, color: AppColors.warn),
-                ),
-              Icon(expanded ? Icons.expand_less : Icons.expand_more, size: 18, color: AppColors.textDim),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 }

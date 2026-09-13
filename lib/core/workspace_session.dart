@@ -21,6 +21,9 @@ class WorkspaceSession {
   /// Editor tabs: files and Claude chats.
   final EditorState editor;
 
+  /// Set by the workspace page: sends a command line to the terminal panel.
+  void Function(String command)? runInTerminal;
+
   SshConnection get conn => hostConn.conn;
   PortForwarder get ports => hostConn.ports;
   HostConfig get host => conn.host;

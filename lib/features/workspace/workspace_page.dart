@@ -13,6 +13,7 @@ import '../editor/editor_view.dart';
 import '../files/file_browser.dart';
 import '../ports/ports_view.dart';
 import '../terminal/terminal_view.dart';
+import 'context_menu.dart';
 import 'split_pane.dart';
 
 /// Main screen for a connected folder. Wide layouts mimic VS Code: a
@@ -34,7 +35,9 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
   double _sidebarWidth = 280;
   double _terminalHeight = 260;
   StreamSubscription? _portSub;
-  late final _terminal = const TerminalPane(key: ValueKey('terminal'));
+  // GlobalKey keeps the shell alive when the panel is hidden or moved.
+  final _terminalKey = GlobalKey<TerminalPaneState>();
+  late final _terminal = TerminalPane(key: _terminalKey);
 
   @override
   void initState() {
@@ -50,6 +53,10 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
       ));
     });
     ws.conn.addListener(_onConn);
+    ws.runInTerminal = (cmd) {
+      setState(() => _terminalOpen = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) => _terminalKey.currentState?.runCommand(cmd));
+    };
     // Start with one Claude tab, like opening Claude Code in VS Code.
     if (ws.editor.tabs.isEmpty) ws.editor.openClaude();
   }
@@ -201,7 +208,9 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
                 ),
               ],
             ),
-            body: wide ? _wide(context) : _narrow(context),
+            body: wide
+                ? Column(children: [Expanded(child: _wide(context)), _statusBar(ws)])
+                : _narrow(context),
             bottomNavigationBar: wide
                 ? null
                 : NavigationBar(
@@ -288,11 +297,18 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
       maximized: _terminalMax,
       onClose: _toggleTerminal,
       onToggleMax: () => setState(() => _terminalMax = !_terminalMax),
+      onKill: () => _terminalKey.currentState?.restart(),
     );
 
     Widget main;
     if (!_terminalOpen) {
-      main = const EditorView();
+      // Hidden, not disposed: the shell keeps running.
+      main = Column(
+        children: [
+          const Expanded(child: EditorView()),
+          Offstage(offstage: true, child: SizedBox(height: 0, child: _terminal)),
+        ],
+      );
     } else if (_terminalMax) {
       main = terminalPanel;
     } else {
@@ -323,6 +339,54 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
         _sidebarWidth = v;
         _saveLayout();
       }),
+    );
+  }
+
+  /// VS Code-style status bar: the obvious place to get the terminal back.
+  Widget _statusBar(WorkspaceSession ws) {
+    Widget item(IconData icon, String label, VoidCallback onTap, {bool active = false, String? tooltip}) {
+      return Tooltip(
+        message: tooltip ?? label,
+        child: InkWell(
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            color: active ? Colors.white.withValues(alpha: 0.08) : null,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 13, color: Colors.white),
+                const SizedBox(width: 5),
+                Text(label, style: const TextStyle(fontSize: 11.5, color: Colors.white)),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      height: 22,
+      color: const Color(0xFF0E639C),
+      child: Row(
+        children: [
+          item(Icons.cloud_done_outlined, '${ws.host.label}: ${ws.dirName}', () => Navigator.of(context).maybePop(),
+              tooltip: ws.workDir),
+          const Spacer(),
+          ListenableBuilder(
+            listenable: ws.ports,
+            builder: (_, _) => ws.ports.forwards.isEmpty
+                ? const SizedBox.shrink()
+                : item(Icons.cable, '${ws.ports.forwards.length} port${ws.ports.forwards.length == 1 ? '' : 's'}',
+                    () => setState(() {
+                          _sidebarOpen = true;
+                          _sideTab = 2;
+                        })),
+          ),
+          item(Icons.view_sidebar_outlined, 'Sidebar', _toggleSidebar, active: _sidebarOpen, tooltip: 'Toggle sidebar (Ctrl+B)'),
+          item(Icons.terminal, 'Terminal', _toggleTerminal, active: _terminalOpen, tooltip: 'Toggle terminal (Ctrl+`)'),
+        ],
+      ),
     );
   }
 
@@ -358,17 +422,27 @@ class _TerminalPanel extends StatelessWidget {
     required this.maximized,
     required this.onClose,
     required this.onToggleMax,
+    required this.onKill,
   });
   final Widget terminal;
   final bool maximized;
   final VoidCallback onClose;
   final VoidCallback onToggleMax;
+  final VoidCallback onKill;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
-        Material(
+        ContextMenuRegion(
+          longPress: false,
+          actions: () => [
+            MenuAction(maximized ? 'Restore panel size' : 'Maximize panel', onToggleMax, icon: maximized ? Icons.close_fullscreen : Icons.open_in_full),
+            MenuAction('Hide panel', onClose, icon: Icons.close, shortcut: 'Ctrl+`'),
+            menuDivider,
+            MenuAction('Kill terminal and restart', onKill, icon: Icons.delete_outline, danger: true),
+          ],
+          child: Material(
           color: AppColors.panel,
           child: SizedBox(
             height: 30,
@@ -377,6 +451,12 @@ class _TerminalPanel extends StatelessWidget {
                 const SizedBox(width: 12),
                 const Text('TERMINAL', style: TextStyle(fontSize: 11, letterSpacing: 1, color: AppColors.textDim)),
                 const Spacer(),
+                IconButton(
+                  tooltip: 'Kill terminal and start a new shell',
+                  iconSize: 16,
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: onKill,
+                ),
                 IconButton(
                   tooltip: maximized ? 'Restore panel size' : 'Maximize panel',
                   iconSize: 16,
@@ -392,6 +472,7 @@ class _TerminalPanel extends StatelessWidget {
               ],
             ),
           ),
+        ),
         ),
         const Divider(height: 1),
         Expanded(child: terminal),
