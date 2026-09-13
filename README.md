@@ -1,6 +1,6 @@
 # CodeApp
 
-一个非常轻量的远程开发客户端，Windows / macOS / iPhone 一套代码（Flutter）。
+一个非常轻量的远程开发客户端，Windows / macOS / Linux / iPhone / Android 一套代码（Flutter）。
 所有计算都在你的云端服务器上，客户端只是一个通过 SSH 连过去的 UI。
 
 功能：
@@ -35,6 +35,8 @@ claude   # 第一次运行按提示用订阅账号登录
 - https://github.com/shifuhou/codeapp/releases/download/latest/CodeApp-windows-x64.zip
 - https://github.com/shifuhou/codeapp/releases/download/latest/CodeApp-macos.zip
 - https://github.com/shifuhou/codeapp/releases/download/latest/CodeApp-ios-unsigned.ipa
+- https://github.com/shifuhou/codeapp/releases/download/latest/CodeApp-linux-x64.tar.gz
+- https://github.com/shifuhou/codeapp/releases/download/latest/CodeApp-android.apk
 
 产物说明：
 
@@ -43,6 +45,16 @@ claude   # 第一次运行按提示用订阅账号登录
 | Windows | `CodeApp-windows-x64.zip` | 解压运行 `codeapp.exe` |
 | macOS | `CodeApp-macos.zip` | 未签名。首次打开右键 → 打开，或 `xattr -dr com.apple.quarantine codeapp.app` |
 | iOS | `CodeApp-ios-unsigned.ipa` | 未签名，需要用你的 Apple 开发者账号签名后安装（Xcode / Sideloadly / AltStore） |
+| Linux | `CodeApp-linux-x64.tar.gz` | 解压后运行 `./codeapp`，需要系统有 GTK 3 |
+| Android | `CodeApp-android.apk` | 直接安装。默认用 debug 密钥签名，升级前要先卸载旧版；配置下面的 secrets 后会用固定密钥 |
+
+Android 固定签名（可选，一次性）：本地生成 keystore 后把三项加进仓库的 Settings → Secrets：
+
+```bash
+keytool -genkey -v -keystore codeapp.jks -alias codeapp -keyalg RSA -keysize 2048 -validity 10000
+base64 -w0 codeapp.jks   # 内容填到 ANDROID_KEYSTORE_BASE64
+# 另外两项：ANDROID_KEYSTORE_PASSWORD、ANDROID_KEY_ALIAS（=codeapp）
+```
 
 打一个 `v*` 标签（例如 `git tag v0.1.0 && git push --tags`）会自动创建 GitHub Release 并附上三个产物。
 
