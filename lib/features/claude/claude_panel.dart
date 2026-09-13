@@ -10,6 +10,7 @@ import '../../app.dart';
 import '../../core/claude/claude_chat.dart';
 import '../../core/claude/claude_protocol.dart';
 import '../../core/claude/session_index.dart';
+import '../../core/ssh/ssh_connection.dart';
 import '../../core/workspace_session.dart';
 import '../workspace/context_menu.dart';
 
@@ -35,6 +36,11 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
 
   /// Slash-command suggestions for the current input (empty when hidden).
   List<_SlashCommand> _suggestions = [];
+
+  /// @file suggestions for the current input (empty when hidden).
+  List<String> _fileSuggestions = [];
+  List<String>? _fileIndex;
+  Future<void>? _fileIndexLoad;
 
   static const _modelChoices = <String, String>{
     'default': 'Default (whatever the CLI is configured with)',
@@ -64,8 +70,40 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
     _input.addListener(_onInputChanged);
   }
 
+  static final _mentionRe = RegExp(r'@([^\s@]*)$');
+
+  Future<void> _loadFileIndex() async {
+    final ws = ref.read(workspaceProvider);
+    try {
+      final out = await ws.conn.run(
+        'cd ${shq(ws.workDir)} && (git ls-files 2>/dev/null || find . -type f -not -path "*/.git/*" | sed "s|^./||") | head -n 4000',
+      );
+      _fileIndex = out.split('\n').where((l) => l.trim().isNotEmpty).toList();
+    } catch (_) {
+      _fileIndex = [];
+    }
+    if (mounted) _onInputChanged();
+  }
+
   void _onInputChanged() {
     final t = _input.text;
+    // @path completion at the caret end.
+    final sel = _input.selection;
+    final head = sel.isValid ? t.substring(0, sel.extentOffset.clamp(0, t.length)) : t;
+    final m = _mentionRe.firstMatch(head);
+    List<String> files = [];
+    if (m != null) {
+      if (_fileIndex == null) {
+        _fileIndexLoad ??= _loadFileIndex();
+      } else {
+        final q = m.group(1)!.toLowerCase();
+        files = _fileIndex!.where((f) => f.toLowerCase().contains(q)).take(8).toList();
+        files.sort((a, b) => a.length.compareTo(b.length));
+      }
+    }
+    if (files.length != _fileSuggestions.length || !identical(files.firstOrNull, _fileSuggestions.firstOrNull)) {
+      setState(() => _fileSuggestions = files);
+    }
     List<_SlashCommand> next = [];
     if (t.startsWith('/') && !t.contains('\n')) {
       final typed = t.split(' ').first.substring(1).toLowerCase();
@@ -207,10 +245,27 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
   }
 
   void _completeSuggestion() {
+    if (_fileSuggestions.isNotEmpty) {
+      _insertMention(_fileSuggestions.first);
+      return;
+    }
     final first = _suggestions.firstOrNull;
     if (first == null) return;
     _input.text = '/${first.name} ';
     _input.selection = TextSelection.collapsed(offset: _input.text.length);
+  }
+
+  void _insertMention(String path) {
+    final t = _input.text;
+    final sel = _input.selection;
+    final end = sel.isValid ? sel.extentOffset.clamp(0, t.length) : t.length;
+    final head = t.substring(0, end);
+    final m = _mentionRe.firstMatch(head);
+    if (m == null) return;
+    final replaced = '${head.substring(0, m.start)}@$path ';
+    _input.text = replaced + t.substring(end);
+    _input.selection = TextSelection.collapsed(offset: replaced.length);
+    _focus.requestFocus();
   }
 
   bool _scrolledOnce = false;
@@ -310,7 +365,8 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
               // Pinned bars take at most half the panel so the input always
               // fits; keys keep the input's element (and focus) stable while
               // bars come and go above it.
-              if (chat.pendingPermissions.isNotEmpty || _suggestions.isNotEmpty)
+              if (chat.todos.isNotEmpty) _TodoCard(key: const ValueKey('todos'), todos: chat.todos),
+              if (chat.pendingPermissions.isNotEmpty || _suggestions.isNotEmpty || _fileSuggestions.isNotEmpty)
                 ConstrainedBox(
                   key: const ValueKey('bars'),
                   constraints: BoxConstraints(maxHeight: constraints.maxHeight * 0.5),
@@ -324,6 +380,7 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
                           else
                             _PermissionBar(key: ValueKey('perm-${t.call.id}'), item: t, chat: chat),
                         if (_suggestions.isNotEmpty) KeyedSubtree(key: const ValueKey('suggest'), child: _suggestionList()),
+                        if (_fileSuggestions.isNotEmpty) KeyedSubtree(key: const ValueKey('files'), child: _fileSuggestionList()),
                       ],
                     ),
                   ),
@@ -476,6 +533,30 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
     );
   }
 
+  Widget _fileSuggestionList() {
+    return Container(
+      color: AppColors.panelAlt,
+      child: Column(
+        children: [
+          for (final f in _fileSuggestions)
+            InkWell(
+              onTap: () => _insertMention(f),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                child: Row(
+                  children: [
+                    const Icon(Icons.insert_drive_file_outlined, size: 13, color: AppColors.textDim),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(f, style: const TextStyle(fontSize: 12.5, fontFamily: 'JetBrains Mono', fontFamilyFallback: monoFamilies), overflow: TextOverflow.ellipsis)),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _modeRow(ClaudeChat chat) {
     final m = chat.permissionMode;
     final (icon, color) = switch (m) {
@@ -532,7 +613,7 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
             ),
           ),
           const Spacer(),
-          const Text('/ for commands', style: TextStyle(fontSize: 11, color: AppColors.textDim)),
+          const Text('/ commands · @ files', style: TextStyle(fontSize: 11, color: AppColors.textDim)),
         ],
       ),
     );
@@ -892,6 +973,7 @@ class _ToolCallView extends StatelessWidget {
             : Icon(res.isError ? Icons.error_outline : Icons.check, size: 15, color: res.isError ? AppColors.err : AppColors.ok);
 
     final input = _formatInput(item.call);
+    final kids = item.children;
     return ContextMenuRegion(
       longPress: false,
       actions: () => [
@@ -901,13 +983,24 @@ class _ToolCallView extends StatelessWidget {
       ],
       child: _Collapsible(
         icon: Icons.build_outlined,
-        title: '${item.call.name}  ${_summary()}',
+        title: '${item.call.name}  ${_summary()}${kids.isEmpty ? '' : '  · ${kids.whereType<ToolCallItem>().length} steps'}',
         trailing: Padding(padding: const EdgeInsets.only(right: 6), child: status),
         initiallyOpen: pending != null,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _code(input),
+            if (kids.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Container(
+                decoration: BoxDecoration(border: Border(left: BorderSide(color: AppColors.accent.withValues(alpha: 0.5), width: 2))),
+                padding: const EdgeInsets.only(left: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [for (final k in kids) _ItemView(item: k, chat: chat)],
+                ),
+              ),
+            ],
             if (pending != null && !item.isQuestion) ...[
               const SizedBox(height: 8),
               Text('Claude wants to use ${pending.toolName}. Allow?', style: const TextStyle(fontSize: 12.5, color: AppColors.warn)),
@@ -1127,9 +1220,17 @@ class _PermissionBar extends StatelessWidget {
               const Spacer(),
               TextButton(onPressed: () => chat.respondPermission(item, allow: false), child: const Text('Deny')),
               const SizedBox(width: 4),
+              Tooltip(
+                message: 'Adds an allow rule to this project (.claude/settings.local.json)',
+                child: OutlinedButton(
+                  onPressed: () => chat.allowAlways(item),
+                  child: Text('Always allow ${req.alwaysAllowLabel.length > 40 ? '${req.alwaysAllowLabel.substring(0, 40)}…' : req.alwaysAllowLabel}'),
+                ),
+              ),
+              const SizedBox(width: 4),
               OutlinedButton(
                 onPressed: () => chat.setPermissionMode(PermissionMode.bypassPermissions),
-                child: const Text('Allow all (bypass)'),
+                child: const Text('Bypass all'),
               ),
               const SizedBox(width: 4),
               FilledButton(onPressed: () => chat.respondPermission(item, allow: true), child: const Text('Allow')),
@@ -1281,6 +1382,97 @@ class _QuestionBarState extends State<_QuestionBar> {
               ),
             ],
           ),
+    );
+  }
+}
+
+
+/// Claude's current plan (TodoWrite), shown above the input while work is
+/// in progress; collapses to one line.
+class _TodoCard extends StatefulWidget {
+  const _TodoCard({super.key, required this.todos});
+  final List<Map<String, dynamic>> todos;
+
+  @override
+  State<_TodoCard> createState() => _TodoCardState();
+}
+
+class _TodoCardState extends State<_TodoCard> {
+  bool _open = true;
+
+  @override
+  Widget build(BuildContext context) {
+    final todos = widget.todos;
+    final done = todos.where((t) => t['status'] == 'completed').length;
+    final active = todos.where((t) => t['status'] == 'in_progress').map((t) => t['activeForm'] ?? t['content']).firstOrNull;
+    return Container(
+      color: AppColors.panel,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _open = !_open),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 6, 8, 6),
+              child: Row(
+                children: [
+                  const Icon(Icons.checklist, size: 15, color: AppColors.accent),
+                  const SizedBox(width: 8),
+                  Text('Tasks $done/${todos.length}', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 10),
+                  if (!_open && active != null)
+                    Expanded(child: Text('$active…', style: const TextStyle(fontSize: 12, color: AppColors.textDim), overflow: TextOverflow.ellipsis))
+                  else
+                    const Spacer(),
+                  Icon(_open ? Icons.expand_more : Icons.chevron_right, size: 16, color: AppColors.textDim),
+                ],
+              ),
+            ),
+          ),
+          if (_open)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 12, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final t in todos)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            switch (t['status']) {
+                              'completed' => Icons.check_circle,
+                              'in_progress' => Icons.radio_button_checked,
+                              _ => Icons.radio_button_off,
+                            },
+                            size: 14,
+                            color: switch (t['status']) {
+                              'completed' => AppColors.ok,
+                              'in_progress' => AppColors.accent,
+                              _ => AppColors.textDim,
+                            },
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '${t['status'] == 'in_progress' ? (t['activeForm'] ?? t['content']) : t['content']}',
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                color: t['status'] == 'completed' ? AppColors.textDim : AppColors.text,
+                                decoration: t['status'] == 'completed' ? TextDecoration.lineThrough : null,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

@@ -79,12 +79,31 @@ class PermissionRequest {
     required this.input,
     required this.toolUseId,
     this.description,
+    this.suggestions = const [],
   });
   final String requestId;
   final String toolName;
   final Map<String, dynamic> input;
   final String? toolUseId;
   final String? description;
+
+  /// Permission-rule updates the CLI proposes for "always allow" (the same
+  /// ones its own prompt offers), e.g. `Bash(npm test:*)`.
+  final List<Map<String, dynamic>> suggestions;
+
+  /// Human-readable rule for the first suggestion, or a plain tool rule.
+  String get alwaysAllowLabel {
+    for (final s in suggestions) {
+      final rules = s['rules'];
+      if (s['behavior'] == 'allow' && rules is List && rules.isNotEmpty) {
+        return rules.map((r) {
+          final c = r['ruleContent'];
+          return c == null ? '${r['toolName']}' : '${r['toolName']}($c)';
+        }).join(', ');
+      }
+    }
+    return toolName;
+  }
 }
 
 /// Chat timeline items rendered by the UI.
@@ -115,6 +134,10 @@ class ToolCallItem extends ChatItem {
   ToolResultBlock? result;
   PermissionRequest? pendingPermission;
   String? permissionDecision; // 'allow' | 'deny'
+
+  /// Messages produced by a subagent this tool call spawned (Task/Agent):
+  /// the CLI tags them with `parent_tool_use_id`.
+  final List<ChatItem> children = [];
 
   /// AskUserQuestion is delivered as a permission request whose answer is
   /// the user's choice, so it needs its own UI rather than Allow/Deny.

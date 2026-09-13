@@ -54,6 +54,9 @@ class ClaudeChat extends ChangeNotifier {
   /// Context size of the last request (input + cache tokens).
   int lastContextTokens = 0;
 
+  /// Latest TodoWrite list (content/status/activeForm maps).
+  List<Map<String, dynamic>> todos = [];
+
   /// Permission requests waiting for an answer, oldest first.
   List<ToolCallItem> get pendingPermissions =>
       items.whereType<ToolCallItem>().where((t) => t.pendingPermission != null).toList();
@@ -291,7 +294,7 @@ class ClaudeChat extends ChangeNotifier {
     });
   }
 
-  void respondPermission(ToolCallItem item, {required bool allow, String? message}) {
+  void respondPermission(ToolCallItem item, {required bool allow, String? message, List<Map<String, dynamic>>? updatedPermissions}) {
     final req = item.pendingPermission;
     if (req == null) return;
     item.pendingPermission = null;
@@ -302,10 +305,35 @@ class ClaudeChat extends ChangeNotifier {
         'subtype': 'success',
         'request_id': req.requestId,
         'response': allow
-            ? {'behavior': 'allow', 'updatedInput': req.input}
+            ? {
+                'behavior': 'allow',
+                'updatedInput': req.input,
+                if (updatedPermissions != null && updatedPermissions.isNotEmpty) 'updatedPermissions': updatedPermissions,
+              }
             : {'behavior': 'deny', 'message': message ?? 'User denied this action'},
       },
     });
+    _notify();
+  }
+
+  /// Allow and remember: applies the CLI's suggested rule (written to the
+  /// project's .claude/settings.local.json, like the original prompt's
+  /// "always allow"), or a plain rule for the tool when none was suggested.
+  void allowAlways(ToolCallItem item) {
+    final req = item.pendingPermission;
+    if (req == null) return;
+    final rules = req.suggestions.where((s) => s['behavior'] == 'allow').toList();
+    respondPermission(item, allow: true, updatedPermissions: rules.isNotEmpty
+        ? rules
+        : [
+            {
+              'type': 'addRules',
+              'rules': [{'toolName': req.toolName}],
+              'behavior': 'allow',
+              'destination': 'localSettings',
+            }
+          ]);
+    items.add(SystemNoteItem('Always allow: ${req.alwaysAllowLabel}'));
     _notify();
   }
 
@@ -354,9 +382,9 @@ class ClaudeChat extends ChangeNotifier {
       case 'stream_event':
         _onStreamEvent(o['event'] as Map<String, dynamic>? ?? {});
       case 'assistant':
-        _onAssistant(o['message'] as Map<String, dynamic>? ?? {});
+        _onAssistant(o['message'] as Map<String, dynamic>? ?? {}, parent: o['parent_tool_use_id'] as String?);
       case 'user':
-        _onUser(o['message'] as Map<String, dynamic>? ?? {});
+        _onUser(o['message'] as Map<String, dynamic>? ?? {}, parent: o['parent_tool_use_id'] as String?);
       case 'control_request':
         _onControlRequest(o);
       case 'control_response':
@@ -407,12 +435,17 @@ class ClaudeChat extends ChangeNotifier {
     }
   }
 
-  void _onAssistant(Map<String, dynamic> msg) {
+  /// Where a message lands: the main timeline, or inside the tool call
+  /// that spawned the subagent producing it.
+  List<ChatItem> _sink(String? parent) => (parent == null ? null : _toolCalls[parent]?.children) ?? items;
+
+  void _onAssistant(Map<String, dynamic> msg, {String? parent}) {
     final content = msg['content'];
     if (content is! List) return;
+    final sink = _sink(parent);
     // The final assistant message supersedes the streamed partial text.
     final st = _streamingText;
-    if (st != null) {
+    if (st != null && parent == null) {
       items.remove(st);
       _streamingText = null;
     }
@@ -420,13 +453,28 @@ class ClaudeChat extends ChangeNotifier {
       final b = ContentBlock.fromJson((raw as Map).cast<String, dynamic>());
       switch (b) {
         case TextBlock():
-          if (b.text.trim().isNotEmpty) items.add(AssistantTextItem(b.text));
+          if (b.text.trim().isNotEmpty) sink.add(AssistantTextItem(b.text));
         case ThinkingBlock():
-          if (b.text.trim().isNotEmpty) items.add(ThinkingItem(b.text));
+          if (b.text.trim().isNotEmpty) sink.add(ThinkingItem(b.text));
         case ToolUseBlock():
           final item = ToolCallItem(b);
           _toolCalls[b.id] = item;
-          items.add(item);
+          sink.add(item);
+          if (b.name == 'TodoWrite') {
+            final t = b.input['todos'];
+            if (t is List) todos = [for (final x in t) if (x is Map) x.cast<String, dynamic>()];
+          } else if (b.name == 'TaskUpdate') {
+            // Newer CLIs track work as tasks: TaskCreate (id comes back in
+            // the result) and TaskUpdate(taskId, status, subject?).
+            final id = '${b.input['taskId']}';
+            final t = todos.where((x) => x['id'] == id).firstOrNull;
+            if (t != null) {
+              if (b.input['status'] != null) t['status'] = b.input['status'];
+              if (b.input['subject'] != null) t['content'] = b.input['subject'];
+              if (b.input['activeForm'] != null) t['activeForm'] = b.input['activeForm'];
+              todos = [...todos];
+            }
+          }
         case ToolResultBlock():
         case null:
           break;
@@ -434,7 +482,7 @@ class ClaudeChat extends ChangeNotifier {
     }
   }
 
-  void _onUser(Map<String, dynamic> msg) {
+  void _onUser(Map<String, dynamic> msg, {String? parent}) {
     final content = msg['content'];
     if (content is! List) return;
     for (final raw in content) {
@@ -443,8 +491,22 @@ class ClaudeChat extends ChangeNotifier {
         final item = _toolCalls[b.toolUseId];
         if (item != null) {
           item.result = b;
+          if (item.call.name == 'TaskCreate' && !b.isError) {
+            final id = RegExp(r'#(\d+)').firstMatch(b.content)?.group(1);
+            if (id != null && !todos.any((x) => x['id'] == id)) {
+              todos = [
+                ...todos,
+                {
+                  'id': id,
+                  'content': item.call.input['subject'] ?? item.call.input['description'] ?? 'Task #$id',
+                  'activeForm': item.call.input['activeForm'],
+                  'status': 'pending',
+                },
+              ];
+            }
+          }
         } else {
-          items.add(SystemNoteItem(b.content, isError: b.isError));
+          _sink(parent).add(SystemNoteItem(b.content, isError: b.isError));
         }
       }
     }
@@ -459,6 +521,10 @@ class ClaudeChat extends ChangeNotifier {
       input: (req['input'] as Map?)?.cast<String, dynamic>() ?? {},
       toolUseId: req['tool_use_id'] as String?,
       description: req['description'] as String?,
+      suggestions: [
+        for (final s in (req['permission_suggestions'] as List? ?? const []))
+          if (s is Map) s.cast<String, dynamic>(),
+      ],
     );
     ToolCallItem? item;
     if (pr.toolUseId != null) item = _toolCalls[pr.toolUseId!];
