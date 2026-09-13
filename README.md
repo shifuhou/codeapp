@@ -29,7 +29,14 @@ claude   # 第一次运行按提示用订阅账号登录
 
 ## 打包
 
-推到 GitHub 后，Actions 会自动构建：
+推到 GitHub 后，Actions 会自动构建，并把三个包挂到一个滚动更新的 `latest` 预发布版本上，
+直接下载、不套多层 zip、不用登录：
+
+- https://github.com/shifuhou/codeapp/releases/download/latest/CodeApp-windows-x64.zip
+- https://github.com/shifuhou/codeapp/releases/download/latest/CodeApp-macos.zip
+- https://github.com/shifuhou/codeapp/releases/download/latest/CodeApp-ios-unsigned.ipa
+
+产物说明：
 
 | 平台 | 产物 | 说明 |
 | --- | --- | --- |
