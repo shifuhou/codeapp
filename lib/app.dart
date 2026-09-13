@@ -16,9 +16,29 @@ class AppColors {
   static const err = Color(0xFFF14C4C);
 }
 
+/// Chinese/Japanese/Korean fallbacks, best first per platform. Without an
+/// explicit list Flutter may pick a bitmap-looking font such as SimSun.
+const cjkFamilies = [
+  'Microsoft YaHei UI', 'Microsoft YaHei', // Windows
+  'PingFang SC', 'Hiragino Sans GB', // macOS / iOS
+  'Noto Sans CJK SC', 'Noto Sans SC', 'Source Han Sans SC', // Linux / Android
+  'WenQuanYi Micro Hei', 'Droid Sans Fallback',
+];
+
+/// UI text: the platform's system font, then CJK fallbacks.
+const uiFamilies = [
+  'Segoe UI', // Windows
+  '.SF NS', 'SF Pro Text', 'Helvetica Neue', // macOS / iOS
+  'Roboto', 'Noto Sans', 'Ubuntu', 'DejaVu Sans', // Android / Linux
+  ...cjkFamilies,
+];
+
+/// Code and terminal: JetBrains Mono is bundled with the app, so it is the
+/// same on every platform; the rest only matter for glyphs it lacks.
 const monoFamilies = [
-  'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', 'Menlo',
-  'Consolas', 'DejaVu Sans Mono', 'Liberation Mono', 'monospace',
+  'JetBrains Mono',
+  'Cascadia Code', 'Consolas', 'SF Mono', 'Menlo', 'DejaVu Sans Mono', 'Liberation Mono',
+  ...cjkFamilies,
 ];
 
 class CodeApp extends StatelessWidget {
@@ -36,6 +56,7 @@ class CodeApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: scheme,
+        fontFamilyFallback: uiFamilies,
         scaffoldBackgroundColor: AppColors.bg,
         canvasColor: AppColors.panel,
         dividerColor: AppColors.border,
