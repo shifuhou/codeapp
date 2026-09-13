@@ -35,7 +35,7 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter build windows --release
+      - run: flutter build windows --release --dart-define=BUILD_COMMIT=${{ github.sha }}
       # Artifact: upload the folder itself so GitHub's own zip is the only layer.
       - uses: actions/upload-artifact@v4
         with:
@@ -61,7 +61,7 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter build macos --release
+      - run: flutter build macos --release --dart-define=BUILD_COMMIT=${{ github.sha }}
       - name: Zip .app
         run: ditto -c -k --keepParent build/macos/Build/Products/Release/codeapp.app CodeApp-macos.zip
       # .app bundles need a zip made with ditto (keeps permissions/symlinks),
@@ -87,7 +87,7 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter build linux --release
+      - run: flutter build linux --release --dart-define=BUILD_COMMIT=${{ github.sha }}
       - name: Tar (keeps executable bits)
         run: tar -C build/linux/x64/release/bundle -czf CodeApp-linux-x64.tar.gz .
       - uses: actions/upload-artifact@v4
@@ -125,7 +125,7 @@ jobs:
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
           echo "ANDROID_KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
           echo "ANDROID_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> "$GITHUB_ENV"
-      - run: flutter build apk --release
+      - run: flutter build apk --release --dart-define=BUILD_COMMIT=${{ github.sha }}
       - run: cp build/app/outputs/flutter-apk/app-release.apk CodeApp-android.apk
       - uses: actions/upload-artifact@v4
         with:
@@ -149,7 +149,7 @@ jobs:
       - run: flutter pub get
       # Unsigned build. To install on a device, sign it with your Apple
       # developer account (Xcode, or a tool like iOS App Signer / Sideloadly).
-      - run: flutter build ios --release --no-codesign
+      - run: flutter build ios --release --no-codesign --dart-define=BUILD_COMMIT=${{ github.sha }}
       - name: Package unsigned .ipa
         run: |
           mkdir -p Payload

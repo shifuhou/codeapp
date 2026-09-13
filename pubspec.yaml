@@ -11,7 +11,9 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_riverpod: ^3.4.3
+  http: ^1.6.0
   markdown_widget: ^2.3.2+8
+  package_info_plus: ^10.2.1
   path_provider: ^2.1.6
   re_editor: ^0.10.0
   re_highlight: ^0.0.3

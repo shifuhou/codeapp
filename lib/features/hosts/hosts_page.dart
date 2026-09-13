@@ -7,6 +7,7 @@ import '../../core/models/host.dart';
 import '../../core/ssh/connection_manager.dart';
 import '../../core/storage/host_store.dart';
 import '../../core/workspace_session.dart';
+import '../update/update_dialog.dart';
 import '../workspace/workspace_page.dart';
 import 'connect_flow.dart';
 import 'folder_picker_page.dart';
@@ -31,6 +32,11 @@ class _HostsPageState extends ConsumerState<HostsPage> {
       appBar: AppBar(
         title: const Text('Remotes (SSH)'),
         actions: [
+          IconButton(
+            tooltip: 'Check for updates',
+            icon: const Icon(Icons.system_update_alt),
+            onPressed: () => checkForUpdate(context),
+          ),
           IconButton(
             tooltip: 'Refresh (re-read ~/.ssh/config)',
             icon: const Icon(Icons.refresh),
