@@ -13,7 +13,10 @@ import '../workspace/context_menu.dart';
 /// Interactive shell on the remote. Keeps its state (and the shell) alive
 /// when hidden; the workspace page holds it with a GlobalKey.
 class TerminalPane extends ConsumerStatefulWidget {
-  const TerminalPane({super.key});
+  const TerminalPane({super.key, this.initialCommand});
+
+  /// Run after `cd` into the workspace (e.g. `claude --resume …`).
+  final String? initialCommand;
 
   @override
   ConsumerState<TerminalPane> createState() => TerminalPaneState();
@@ -63,6 +66,8 @@ class TerminalPaneState extends ConsumerState<TerminalPane> {
       s.stderr.cast<List<int>>().transform(utf8.decoder).listen(_terminal.write);
       final dir = ws.workDir;
       if (dir.isNotEmpty) s.write(utf8.encode('cd ${_q(dir)} && clear\n'));
+      final cmd = widget.initialCommand;
+      if (cmd != null && cmd.isNotEmpty) s.write(utf8.encode('$cmd\n'));
       s.done.then((_) {
         if (!mounted) return;
         setState(() {

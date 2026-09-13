@@ -6,6 +6,7 @@ import 'package:re_editor/re_editor.dart';
 import '../../app.dart';
 import '../../core/workspace_session.dart';
 import '../claude/claude_panel.dart';
+import '../terminal/terminal_view.dart';
 import '../workspace/context_menu.dart';
 import 'editor_state.dart';
 import 'languages.dart';
@@ -30,6 +31,7 @@ class EditorView extends ConsumerWidget {
               child: switch (tab) {
                 FileTab t => _Editor(key: ValueKey('file:${t.file.path}'), file: t.file, editor: editor),
                 ClaudeTab t => ClaudePanel(key: ValueKey('claude:${identityHashCode(t.chat)}'), chat: t.chat),
+                ShellTab t => TerminalPane(key: ValueKey('shell:${identityHashCode(t)}'), initialCommand: t.command),
                 null => _Empty(editor: editor),
               },
             ),
@@ -103,7 +105,11 @@ class _TabStrip extends StatelessWidget {
                       child: Row(
                         children: [
                           Icon(
-                            tab is ClaudeTab ? Icons.auto_awesome : Icons.insert_drive_file_outlined,
+                            switch (tab) {
+                              ClaudeTab() => Icons.auto_awesome,
+                              ShellTab() => Icons.terminal,
+                              FileTab() => Icons.insert_drive_file_outlined,
+                            },
                             size: 13,
                             color: tab is ClaudeTab ? AppColors.accent : AppColors.textDim,
                           ),

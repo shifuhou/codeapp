@@ -160,6 +160,28 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
     return false;
   }
 
+  /// Hands the session over to the real `claude` TUI in a terminal tab. The
+  /// background process is stopped first so only one process writes the
+  /// session; closing the tab resumes it here.
+  Future<void> _openTerminalMode() async {
+    final chat = widget.chat;
+    final id = chat.sessionId;
+    await chat.stop();
+    if (!mounted) return;
+    final editor = ref.read(workspaceProvider).editor;
+    final flags = [
+      if (chat.permissionMode == PermissionMode.bypassPermissions) '--dangerously-skip-permissions'
+      else if (chat.permissionMode != PermissionMode.normal) '--permission-mode ${chat.permissionMode.cliValue}',
+      if (chat.modelOverride != null) '--model ${chat.modelOverride}',
+    ].join(' ');
+    editor.openShell(
+      title: id == null ? 'claude (terminal)' : 'claude ${id.substring(0, 6)}',
+      command: id == null ? 'claude $flags' : 'claude $flags --resume $id',
+      linkedChat: chat,
+      resumeId: id,
+    );
+  }
+
   void _cycleMode() {
     final all = PermissionMode.values;
     final next = all[(all.indexOf(widget.chat.permissionMode) + 1) % all.length];
@@ -272,26 +294,44 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
       listenable: chat,
       builder: (context, _) {
         _autoScroll(chat);
-        return Column(
-          children: [
-            _toolbar(chat),
-            const Divider(height: 1),
-            Expanded(
-              child: chat.loadingHistory && chat.items.isEmpty
-                  ? const Center(child: CircularProgressIndicator())
-                  : chat.items.isEmpty
-                      ? _emptyState(chat)
-                      : _turnList(chat),
-            ),
-            if (chat.busy) const LinearProgressIndicator(key: ValueKey('busy'), minHeight: 2),
-            // Keys keep the input's element (and its focus) stable while
-            // bars and suggestion lists come and go above it.
-            for (final t in chat.pendingPermissions)
-              _PermissionBar(key: ValueKey('perm-${t.call.id}'), item: t, chat: chat),
-            if (_suggestions.isNotEmpty) KeyedSubtree(key: const ValueKey('suggest'), child: _suggestionList()),
-            KeyedSubtree(key: const ValueKey('input'), child: _inputBar(chat)),
-          ],
-        );
+        return LayoutBuilder(builder: (context, constraints) {
+          return Column(
+            children: [
+              _toolbar(chat),
+              const Divider(height: 1),
+              Expanded(
+                child: chat.loadingHistory && chat.items.isEmpty
+                    ? const Center(child: CircularProgressIndicator())
+                    : chat.items.isEmpty
+                        ? _emptyState(chat)
+                        : _turnList(chat),
+              ),
+              if (chat.busy) const LinearProgressIndicator(key: ValueKey('busy'), minHeight: 2),
+              // Pinned bars take at most half the panel so the input always
+              // fits; keys keep the input's element (and focus) stable while
+              // bars come and go above it.
+              if (chat.pendingPermissions.isNotEmpty || _suggestions.isNotEmpty)
+                ConstrainedBox(
+                  key: const ValueKey('bars'),
+                  constraints: BoxConstraints(maxHeight: constraints.maxHeight * 0.5),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (final t in chat.pendingPermissions)
+                          if (t.isQuestion)
+                            _QuestionBar(key: ValueKey('q-${t.call.id}'), item: t, chat: chat)
+                          else
+                            _PermissionBar(key: ValueKey('perm-${t.call.id}'), item: t, chat: chat),
+                        if (_suggestions.isNotEmpty) KeyedSubtree(key: const ValueKey('suggest'), child: _suggestionList()),
+                      ],
+                    ),
+                  ),
+                ),
+              KeyedSubtree(key: const ValueKey('input'), child: _inputBar(chat)),
+            ],
+          );
+        });
       },
     );
   }
@@ -363,6 +403,11 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
               tooltip: 'Expand all responses',
               icon: const Icon(Icons.unfold_more, size: 18),
               onPressed: () => _setAll(true),
+            ),
+            IconButton(
+              tooltip: 'Continue this session in the original Claude Code terminal UI',
+              icon: const Icon(Icons.terminal, size: 18),
+              onPressed: _openTerminalMode,
             ),
             IconButton(
               tooltip: 'Restart with a new session',
@@ -863,7 +908,7 @@ class _ToolCallView extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _code(input),
-            if (pending != null) ...[
+            if (pending != null && !item.isQuestion) ...[
               const SizedBox(height: 8),
               Text('Claude wants to use ${pending.toolName}. Allow?', style: const TextStyle(fontSize: 12.5, color: AppColors.warn)),
               const SizedBox(height: 6),
@@ -1105,6 +1150,137 @@ class _PermissionBar extends StatelessWidget {
             ),
         ],
       ),
+    );
+  }
+}
+
+
+/// Claude asking you to choose (AskUserQuestion), pinned above the input.
+class _QuestionBar extends StatefulWidget {
+  const _QuestionBar({super.key, required this.item, required this.chat});
+  final ToolCallItem item;
+  final ClaudeChat chat;
+
+  @override
+  State<_QuestionBar> createState() => _QuestionBarState();
+}
+
+class _QuestionBarState extends State<_QuestionBar> {
+  late final List<UserQuestion> _qs = widget.item.questions;
+  final Map<int, Set<String>> _picked = {};
+  final Map<int, TextEditingController> _other = {};
+
+  bool get _complete => List.generate(_qs.length, (i) => i).every(
+        (i) => (_picked[i]?.isNotEmpty ?? false) || (_other[i]?.text.trim().isNotEmpty ?? false),
+      );
+
+  void _submit() {
+    final answers = <String, String>{};
+    for (var i = 0; i < _qs.length; i++) {
+      final parts = [...(_picked[i] ?? {})];
+      final other = _other[i]?.text.trim() ?? '';
+      if (other.isNotEmpty) parts.add(other);
+      answers[_qs[i].question] = parts.join(', ');
+    }
+    widget.chat.answerQuestion(widget.item, answers);
+  }
+
+  @override
+  void dispose() {
+    for (final c in _other.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: AppColors.accentDim.withValues(alpha: 0.25),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var i = 0; i < _qs.length; i++) ...[
+                if (i > 0) const SizedBox(height: 12),
+                Row(
+                  children: [
+                    const Icon(Icons.quiz_outlined, size: 16, color: AppColors.accent),
+                    const SizedBox(width: 8),
+                    if (_qs[i].header.isNotEmpty)
+                      Container(
+                        margin: const EdgeInsets.only(right: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(color: AppColors.accentDim, borderRadius: BorderRadius.circular(4)),
+                        child: Text(_qs[i].header, style: const TextStyle(fontSize: 11, color: AppColors.text)),
+                      ),
+                    Expanded(child: Text(_qs[i].question, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600))),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                for (final o in _qs[i].options)
+                  InkWell(
+                    onTap: () => setState(() {
+                      final set = _picked.putIfAbsent(i, () => {});
+                      if (_qs[i].multiSelect) {
+                        set.contains(o.label) ? set.remove(o.label) : set.add(o.label);
+                      } else {
+                        set
+                          ..clear()
+                          ..add(o.label);
+                      }
+                    }),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 3),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            _qs[i].multiSelect
+                                ? ((_picked[i]?.contains(o.label) ?? false) ? Icons.check_box : Icons.check_box_outline_blank)
+                                : ((_picked[i]?.contains(o.label) ?? false) ? Icons.radio_button_checked : Icons.radio_button_off),
+                            size: 17,
+                            color: AppColors.accent,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(o.label, style: const TextStyle(fontSize: 13)),
+                                if (o.description.isNotEmpty)
+                                  Text(o.description, style: const TextStyle(fontSize: 11.5, color: AppColors.textDim)),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: TextField(
+                    controller: _other.putIfAbsent(i, TextEditingController.new),
+                    onChanged: (_) => setState(() {}),
+                    style: const TextStyle(fontSize: 12.5),
+                    decoration: const InputDecoration(hintText: 'Other (type your own answer)', isDense: true, contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Spacer(),
+                  TextButton(
+                    onPressed: () => widget.chat.respondPermission(widget.item, allow: false, message: 'User dismissed the question'),
+                    child: const Text('Skip'),
+                  ),
+                  const SizedBox(width: 6),
+                  FilledButton(onPressed: _complete ? _submit : null, child: const Text('Submit')),
+                ],
+              ),
+            ],
+          ),
     );
   }
 }

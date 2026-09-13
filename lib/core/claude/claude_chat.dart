@@ -216,7 +216,7 @@ class ClaudeChat extends ChangeNotifier {
     if (m == PermissionMode.bypassPermissions) {
       // Anything already waiting is approved by the new mode.
       for (final t in pendingPermissions) {
-        respondPermission(t, allow: true);
+        if (!t.isQuestion) respondPermission(t, allow: true);
       }
     }
     if (!isRunning) return;
@@ -309,6 +309,27 @@ class ClaudeChat extends ChangeNotifier {
     _notify();
   }
 
+  /// Answers an AskUserQuestion: the CLI reads the choices back from
+  /// `updatedInput.answers` (question text -> chosen label(s)).
+  void answerQuestion(ToolCallItem item, Map<String, String> answers) {
+    final req = item.pendingPermission;
+    if (req == null) return;
+    item.pendingPermission = null;
+    item.permissionDecision = 'allow';
+    _write({
+      'type': 'control_response',
+      'response': {
+        'subtype': 'success',
+        'request_id': req.requestId,
+        'response': {
+          'behavior': 'allow',
+          'updatedInput': {...req.input, 'answers': answers},
+        },
+      },
+    });
+    _notify();
+  }
+
   int get pendingPermissionCount =>
       items.whereType<ToolCallItem>().where((t) => t.pendingPermission != null).length;
 
@@ -355,9 +376,11 @@ class ClaudeChat extends ChangeNotifier {
       model = o['model'] as String?;
       final sc = o['slash_commands'];
       if (sc is List) cliSlashCommands = sc.whereType<String>().toList();
+      // --dangerously-skip-permissions makes the CLI start in bypass; the
+      // app's chosen mode is the truth, so put the CLI back to it.
       final pm = o['permissionMode'] as String?;
-      if (pm != null) {
-        permissionMode = PermissionMode.values.firstWhere((m) => m.cliValue == pm, orElse: () => permissionMode);
+      if (pm != null && pm != permissionMode.cliValue) {
+        _control({'subtype': 'set_permission_mode', 'mode': permissionMode.cliValue});
       }
     }
   }
@@ -448,7 +471,7 @@ class ClaudeChat extends ChangeNotifier {
       _toolCalls[item.call.id] = item;
       items.add(item);
     }
-    if (permissionMode == PermissionMode.bypassPermissions) {
+    if (permissionMode == PermissionMode.bypassPermissions && !item.isQuestion) {
       item.pendingPermission = pr;
       respondPermission(item, allow: true);
       return;

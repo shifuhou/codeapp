@@ -115,6 +115,37 @@ class ToolCallItem extends ChatItem {
   ToolResultBlock? result;
   PermissionRequest? pendingPermission;
   String? permissionDecision; // 'allow' | 'deny'
+
+  /// AskUserQuestion is delivered as a permission request whose answer is
+  /// the user's choice, so it needs its own UI rather than Allow/Deny.
+  bool get isQuestion => call.name == 'AskUserQuestion';
+
+  /// Parsed questions for [isQuestion] items.
+  List<UserQuestion> get questions {
+    final qs = (pendingPermission?.input ?? call.input)['questions'];
+    if (qs is! List) return const [];
+    return [
+      for (final q in qs)
+        if (q is Map)
+          UserQuestion(
+            question: q['question'] as String? ?? '',
+            header: q['header'] as String? ?? '',
+            multiSelect: q['multiSelect'] == true,
+            options: [
+              for (final o in (q['options'] as List? ?? const []))
+                if (o is Map) (label: o['label'] as String? ?? '', description: o['description'] as String? ?? ''),
+            ],
+          ),
+    ];
+  }
+}
+
+class UserQuestion {
+  const UserQuestion({required this.question, required this.header, required this.multiSelect, required this.options});
+  final String question;
+  final String header;
+  final bool multiSelect;
+  final List<({String label, String description})> options;
 }
 
 class SystemNoteItem extends ChatItem {

@@ -42,6 +42,18 @@ class ClaudeTab extends WorkspaceTab {
   String get title => label ?? (chat.sessionId == null ? 'Claude' : 'Claude ${chat.sessionId!.substring(0, 6)}');
 }
 
+/// A terminal running a command (e.g. the original Claude Code TUI). When
+/// it closes, [linkedChat] resumes [resumeId] so the chat view continues
+/// the same session.
+class ShellTab extends WorkspaceTab {
+  ShellTab({required this.title, required this.command, this.linkedChat, this.resumeId});
+  @override
+  final String title;
+  final String command;
+  final ClaudeChat? linkedChat;
+  final String? resumeId;
+}
+
 /// Open tabs backed by SFTP (files) and Claude processes (chats).
 class EditorState extends ChangeNotifier {
   EditorState(this.conn, this.workDir);
@@ -100,6 +112,14 @@ class EditorState extends ChangeNotifier {
     return chat;
   }
 
+  ShellTab openShell({required String title, required String command, ClaudeChat? linkedChat, String? resumeId}) {
+    final t = ShellTab(title: title, command: command, linkedChat: linkedChat, resumeId: resumeId);
+    tabs.add(t);
+    activeIndex = tabs.length - 1;
+    notifyListeners();
+    return t;
+  }
+
   /// The most recent Claude tab, creating one if there is none.
   ClaudeChat latestClaude() {
     final t = tabs.lastWhere((t) => t is ClaudeTab, orElse: () => ClaudeTab(openClaude()));
@@ -136,6 +156,13 @@ class EditorState extends ChangeNotifier {
       case ClaudeTab t:
         t.chat.removeListener(notifyListeners);
         t.chat.dispose();
+      case ShellTab t:
+        final chat = t.linkedChat;
+        if (chat != null && t.resumeId != null && chats.contains(chat)) {
+          chat.start(resumeSessionId: t.resumeId);
+          final ci = tabs.indexWhere((x) => x is ClaudeTab && x.chat == chat);
+          if (ci >= 0) activeIndex = ci;
+        }
     }
     if (activeIndex >= tabs.length) activeIndex = tabs.length - 1;
     notifyListeners();
@@ -154,6 +181,8 @@ class EditorState extends ChangeNotifier {
           f.file.controller.dispose();
         case ClaudeTab c:
           c.chat.dispose();
+        case ShellTab():
+          break;
       }
     }
     super.dispose();
