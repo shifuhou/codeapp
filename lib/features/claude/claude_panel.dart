@@ -443,6 +443,11 @@ class _ClaudePanelState extends ConsumerState<ClaudePanel> {
                       ),
                     ),
                     const Icon(Icons.arrow_drop_down, size: 18),
+                    if (chat.isRunning && !chat.attached)
+                      const Padding(
+                        padding: EdgeInsets.only(right: 8),
+                        child: Text('detached', style: TextStyle(fontSize: 11, color: AppColors.warn)),
+                      ),
                     if (chat.model != null)
                       Flexible(
                         child: Text(chat.model!, style: const TextStyle(fontSize: 11, color: AppColors.textDim), overflow: TextOverflow.ellipsis),
@@ -1156,8 +1161,17 @@ class _ClaudeSessionListState extends ConsumerState<ClaudeSessionList> {
                                   selectedTileColor: AppColors.accentDim.withValues(alpha: 0.4),
                                   leading: Icon(Icons.chat_bubble_outline, size: 18, color: current ? AppColors.accent : AppColors.textDim),
                                   title: Text(s.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
-                                  subtitle: Text('${_ago(s.modified)} • ${s.id.substring(0, 8)}',
-                                      style: const TextStyle(fontSize: 11, color: AppColors.textDim)),
+                                  subtitle: Row(
+                                    children: [
+                                      if (s.running) ...[
+                                        const SizedBox(width: 9, height: 9, child: CircularProgressIndicator(strokeWidth: 1.5, color: AppColors.ok)),
+                                        const SizedBox(width: 5),
+                                        const Text('running  ', style: TextStyle(fontSize: 11, color: AppColors.ok)),
+                                      ],
+                                      Text('${_ago(s.modified)} • ${s.id.substring(0, 8)}',
+                                          style: const TextStyle(fontSize: 11, color: AppColors.textDim)),
+                                    ],
+                                  ),
                                   onTap: () => _choose(s.id, title: _shortTitle(s.title)),
                                 ),
                               );

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../ssh/ssh_connection.dart';
+import 'claude_daemon.dart';
 import 'claude_protocol.dart';
 
 class ClaudeSessionInfo {
@@ -9,8 +10,12 @@ class ClaudeSessionInfo {
     required this.title,
     required this.modified,
     required this.sizeBytes,
+    this.running = false,
   });
   final String id;
+
+  /// A detached Claude process for this session is alive on the server.
+  bool running;
   final String title;
   final DateTime modified;
   final int sizeBytes;
@@ -58,7 +63,14 @@ done
 ''';
     final out = await conn.run('bash -c ${shq(script)}',
         timeout: const Duration(seconds: 30));
-    return parseListing(out);
+    final list = parseListing(out);
+    try {
+      final live = await ClaudeDaemon.liveBySession(conn, workDir: workDir);
+      for (final s in list) {
+        s.running = live.containsKey(s.id);
+      }
+    } catch (_) {}
+    return list;
   }
 
   static List<ClaudeSessionInfo> parseListing(String out) {
@@ -174,13 +186,23 @@ done
   static const maxTranscriptBytes = 8 * 1024 * 1024;
 
   /// Loads the stored conversation so it can be shown when resuming.
-  Future<List<ChatItem>> loadTranscript(String sessionId) async {
+  /// Loads the stored transcript; with [maxBytes] only that prefix (what
+  /// existed before a still-running process started appending).
+  Future<List<ChatItem>> loadTranscript(String sessionId, {int? maxBytes}) async {
     final path = '$projectDir/$sessionId.jsonl';
+    if (maxBytes != null && maxBytes <= 0) return [];
+    final head = maxBytes == null ? 'cat' : 'head -c $maxBytes';
     final out = await conn.run(
-      'tail -c $maxTranscriptBytes ${shq(path)} 2>/dev/null',
+      '$head ${shq(path)} 2>/dev/null | tail -c $maxTranscriptBytes',
       timeout: const Duration(seconds: 60),
     );
     return parseTranscript(out);
+  }
+
+  /// Byte size of the stored transcript (0 if it does not exist yet).
+  Future<int> transcriptSize(String sessionId) async {
+    final out = await conn.run('stat -c %s ${shq('$projectDir/$sessionId.jsonl')} 2>/dev/null || echo 0');
+    return int.tryParse(out.trim()) ?? 0;
   }
 
   static List<ChatItem> parseTranscript(String jsonl) {

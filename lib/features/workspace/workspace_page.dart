@@ -26,8 +26,11 @@ class WorkspacePage extends ConsumerStatefulWidget {
   ConsumerState<WorkspacePage> createState() => _WorkspacePageState();
 }
 
-class _WorkspacePageState extends ConsumerState<WorkspacePage> {
+class _WorkspacePageState extends ConsumerState<WorkspacePage> with WidgetsBindingObserver {
   int _tab = 1; // phone: Files, Editor, Terminal, Claude, Ports
+  bool _reconnecting = false;
+  int _reconnectAttempt = 0;
+  String? _reconnectError;
   int _sideTab = 0;
   bool _sidebarOpen = true;
   bool _terminalOpen = true;
@@ -42,6 +45,7 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadLayout();
     final ws = ref.read(workspaceProvider);
     _portSub = ws.ports.newForwardEvents.stream.listen((fp) {
@@ -82,19 +86,90 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
 
   void _onConn() {
     final ws = ref.read(workspaceProvider);
-    if (!ws.conn.isConnected && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Disconnected${ws.conn.error == null ? '' : ': ${ws.conn.error}'}'),
-        backgroundColor: AppColors.err,
-      ));
+    if (!ws.conn.isConnected && mounted && !_reconnecting) _reconnectLoop();
+    if (mounted) setState(() {});
+  }
+
+  /// Phones drop the socket whenever the screen locks; Claude keeps running
+  /// on the server, so just get the connection back and re-attach.
+  Future<void> _reconnectLoop() async {
+    final ws = ref.read(workspaceProvider);
+    if (!ws.conn.canReconnect) return;
+    _reconnecting = true;
+    _reconnectAttempt = 0;
+    _reconnectError = null;
+    if (mounted) setState(() {});
+    while (mounted && !ws.conn.isConnected) {
+      _reconnectAttempt++;
+      try {
+        await ws.conn.reconnect();
+      } catch (e) {
+        _reconnectError = '$e';
+        if (mounted) setState(() {});
+        // Back off: 1s, 2s, 4s, … capped at 15s.
+        final wait = Duration(seconds: (1 << (_reconnectAttempt - 1).clamp(0, 4)).clamp(1, 15));
+        await Future.delayed(wait);
+      }
+    }
+    _reconnecting = false;
+    if (!mounted) return;
+    setState(() {});
+    if (ws.conn.isConnected) {
+      for (final c in ws.editor.chats) {
+        c.reattach();
+      }
+      _terminalKey.currentState?.restart();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      final ws = ref.read(workspaceProvider);
+      if (!ws.conn.isConnected && !_reconnecting) {
+        _reconnectLoop();
+      } else if (ws.conn.isConnected) {
+        // The socket may be dead without us knowing yet; a cheap probe tells.
+        ws.conn.run('true', timeout: const Duration(seconds: 5)).catchError((_) => '');
+        for (final c in ws.editor.chats) {
+          if (!c.attached) c.reattach();
+        }
+      }
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _portSub?.cancel();
     ref.read(workspaceProvider).conn.removeListener(_onConn);
     super.dispose();
+  }
+
+  Widget _reconnectBanner(WorkspaceSession ws) {
+    if (ws.conn.isConnected) return const SizedBox.shrink();
+    return Material(
+      color: AppColors.warn.withValues(alpha: 0.15),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          children: [
+            const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Connection lost. Reconnecting${_reconnectAttempt > 1 ? ' (attempt $_reconnectAttempt)' : ''}… '
+                'Claude keeps running on the server.'
+                '${_reconnectError == null ? '' : '  $_reconnectError'}',
+                style: const TextStyle(fontSize: 12, color: AppColors.warn),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            TextButton(onPressed: _reconnecting ? null : _reconnectLoop, child: const Text('Retry now')),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<bool> _confirmLeave() async {
@@ -208,9 +283,13 @@ class _WorkspacePageState extends ConsumerState<WorkspacePage> {
                 ),
               ],
             ),
-            body: wide
-                ? Column(children: [Expanded(child: _wide(context)), _statusBar(ws)])
-                : _narrow(context),
+            body: Column(
+              children: [
+                _reconnectBanner(ws),
+                Expanded(child: wide ? _wide(context) : _narrow(context)),
+                if (wide) _statusBar(ws),
+              ],
+            ),
             bottomNavigationBar: wide
                 ? null
                 : NavigationBar(

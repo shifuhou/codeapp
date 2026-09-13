@@ -26,28 +26,17 @@ class HostConnection {
 class ConnectionManager extends ChangeNotifier {
   final Map<String, HostConnection> _live = {};
 
-  HostConnection? of(String hostId) {
-    final c = _live[hostId];
-    if (c != null && !c.conn.isConnected) {
-      _live.remove(hostId);
-      c.dispose();
-      return null;
-    }
-    return c;
-  }
+  /// The connection for a host, connected or not (a dropped one can be
+  /// reconnected by whoever holds it).
+  HostConnection? of(String hostId) => _live[hostId];
 
-  bool isConnected(String hostId) => of(hostId) != null;
+  bool isConnected(String hostId) => _live[hostId]?.conn.isConnected ?? false;
 
   void register(HostConfig host, SshConnection conn) {
     _live[host.id]?.dispose();
     final hc = HostConnection(conn);
     _live[host.id] = hc;
-    conn.addListener(() {
-      if (!conn.isConnected) {
-        _live.remove(host.id);
-        notifyListeners();
-      }
-    });
+    conn.addListener(notifyListeners);
     notifyListeners();
   }
 

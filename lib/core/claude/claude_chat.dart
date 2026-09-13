@@ -3,16 +3,20 @@ import 'dart:convert';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
+import 'package:uuid/uuid.dart';
 
 import '../ssh/ssh_connection.dart';
+import 'claude_daemon.dart';
 import 'claude_protocol.dart';
 import 'session_index.dart';
 
-/// Drives one `claude -p` process on the remote over an SSH exec channel and
-/// turns its stream-json output into a chat timeline.
+/// Drives one `claude -p` process on the remote and turns its stream-json
+/// output into a chat timeline.
 ///
-/// The process stays alive across turns (stream-json input) so it behaves
-/// like an interactive session; `sessionId` can be resumed later.
+/// The process is a [ClaudeDaemon]: it lives on the server, detached from the
+/// SSH connection, so a dropped connection (phone locked) does not interrupt
+/// it. The app attaches by tailing its log and can re-attach later; the log
+/// replays everything (including what the app sent) to rebuild the state.
 class ClaudeChat extends ChangeNotifier {
   ClaudeChat(this.conn, this.workDir);
 
@@ -63,13 +67,25 @@ class ClaudeChat extends ChangeNotifier {
 
   final _pendingControl = <String, Completer<Map<String, dynamic>>>{};
 
-  SSHSession? _session;
-  StreamSubscription? _stdoutSub;
-  StreamSubscription? _stderrSub;
-  bool get isRunning => _session != null;
+  ClaudeDaemon? _daemon;
+  SSHSession? _tail;
+  SSHSession? _writer;
+  StreamSubscription? _tailSub;
+
+  /// A process exists on the server (as far as we know).
+  bool get isRunning => _daemon != null;
+
+  /// We are currently following the process output.
+  bool attached = false;
+
+  /// Bytes of log still being replayed after an attach; while > 0 the lines
+  /// are history, and nothing is written back to the process.
+  int _replayRemaining = 0;
+  bool get replaying => _replayRemaining > 0;
+
   bool busy = false; // a turn is in progress
   String? lastError;
-  final _stderrBuf = StringBuffer();
+  Timer? _aliveTimer;
 
   bool _disposed = false;
   void _notify() {
@@ -80,32 +96,34 @@ class ClaudeChat extends ChangeNotifier {
   final Map<String, ToolCallItem> _toolCalls = {};
 
   /// Start (or resume) a Claude process. Safe to call when already running:
-  /// the existing process is stopped first.
+  /// the existing process is stopped first. Resuming a session that still
+  /// has a live process on the server attaches to it instead of starting a
+  /// new one.
   Future<void> start({String? resumeSessionId}) async {
     await stop();
-    items.clear();
-    _toolCalls.clear();
-    _streamingText = null;
-    lastError = null;
+    _resetTimeline();
     sessionId = resumeSessionId;
-    historyItemCount = 0;
     _notify();
 
+    final index = ClaudeSessionIndex(conn, workDir);
+    var histBytes = 0;
     if (resumeSessionId != null) {
-      loadingHistory = true;
-      _notify();
       try {
-        final history = await ClaudeSessionIndex(conn, workDir).loadTranscript(resumeSessionId);
-        items.addAll(history);
-        historyItemCount = history.length;
-        for (final t in history.whereType<ToolCallItem>()) {
-          _toolCalls[t.call.id] = t;
+        final live = await ClaudeDaemon.liveBySession(conn, workDir: workDir);
+        final did = live[resumeSessionId];
+        if (did != null) {
+          _daemon = ClaudeDaemon(conn, did);
+          final meta = await _daemon!.meta();
+          histBytes = int.tryParse(meta['hist_bytes'] ?? '') ?? 0;
+          await _loadHistory(index, resumeSessionId, maxBytes: histBytes);
+          await _attach();
+          return;
         }
+        histBytes = await index.transcriptSize(resumeSessionId);
       } catch (e) {
-        items.add(SystemNoteItem('Could not load history: $e', isError: true));
+        items.add(SystemNoteItem('Could not check for a running process: $e', isError: true));
       }
-      loadingHistory = false;
-      _notify();
+      await _loadHistory(index, resumeSessionId, maxBytes: histBytes);
     }
 
     final args = <String>[
@@ -121,30 +139,154 @@ class ClaudeChat extends ChangeNotifier {
       '--dangerously-skip-permissions',
       '--permission-mode', permissionMode.cliValue,
       if (resumeSessionId != null) ...['--resume', resumeSessionId],
-      if (modelOverride != null && modelOverride!.isNotEmpty) ...[
-        '--model',
-        modelOverride!,
-      ],
+      if (modelOverride != null && modelOverride!.isNotEmpty) ...['--model', modelOverride!],
     ];
-    final cmd = args.map(shq).join(' ');
-
     try {
-      final s = await conn.execIn(workDir, 'CLAUDE_CODE_ENTRYPOINT=$entrypoint exec $cmd');
-      _session = s;
-      _stdoutSub = s.stdout
-          .cast<List<int>>()
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen(_onLine, onError: (e) => _fail('stdout error: $e'));
-      _stderrSub = s.stderr
-          .cast<List<int>>()
-          .transform(utf8.decoder)
-          .listen((t) => _stderrBuf.write(t));
-      s.done.then((_) => _onExit());
+      _daemon = await ClaudeDaemon.start(
+        conn,
+        id: const Uuid().v4(),
+        workDir: workDir,
+        command: args.map(shq).join(' '),
+        env: 'CLAUDE_CODE_ENTRYPOINT=$entrypoint',
+        histBytes: histBytes,
+      );
+      await _attach();
     } catch (e) {
       _fail('Failed to start Claude: $e');
     }
+  }
+
+  void _resetTimeline() {
+    items.clear();
+    _toolCalls.clear();
+    _streamingText = null;
+    lastError = null;
+    historyItemCount = 0;
+    todos = [];
+    _pendingControl.clear();
+  }
+
+  Future<void> _loadHistory(ClaudeSessionIndex index, String id, {int? maxBytes}) async {
+    loadingHistory = true;
     _notify();
+    try {
+      final history = await index.loadTranscript(id, maxBytes: maxBytes);
+      items.addAll(history);
+      historyItemCount = history.length;
+      for (final t in history.whereType<ToolCallItem>()) {
+        _toolCalls[t.call.id] = t;
+      }
+    } catch (e) {
+      items.add(SystemNoteItem('Could not load history: $e', isError: true));
+    }
+    loadingHistory = false;
+    _notify();
+  }
+
+  /// Follow the process log. Everything already in the log is replayed
+  /// first (rebuilding live state), then new output streams in.
+  Future<void> _attach() async {
+    final d = _daemon;
+    if (d == null) return;
+    await _closeChannels();
+    // Drop live items from a previous attach; history stays.
+    if (items.length > historyItemCount) items.removeRange(historyItemCount, items.length);
+    _toolCalls.removeWhere((_, t) => !items.contains(t));
+    _streamingText = null;
+    busy = false;
+    todos = [];
+    _pendingControl.clear();
+
+    try {
+      final size = await conn.run('stat -c %s ${shq('${d.dir}/out.log')} 2>/dev/null || echo 0');
+      _replayRemaining = int.tryParse(size.trim()) ?? 0;
+      final t = await d.tail();
+      _tail = t;
+      _tailSub = t.stdout.cast<List<int>>().map((chunk) {
+        if (_replayRemaining > 0) {
+          _replayRemaining -= chunk.length;
+          if (_replayRemaining <= 0) {
+            _replayRemaining = 0;
+            scheduleMicrotask(_onReplayDone);
+          }
+        }
+        return chunk;
+      }).transform(utf8.decoder).transform(const LineSplitter()).listen(
+            _onLine,
+            onError: (e) => _onDetached('stream error: $e'),
+            onDone: () => _onDetached(null),
+          );
+      attached = true;
+      if (_replayRemaining == 0) _onReplayDone();
+      _aliveTimer?.cancel();
+      _aliveTimer = Timer.periodic(const Duration(seconds: 20), (_) => _checkAlive());
+    } catch (e) {
+      _fail('Could not attach to Claude: $e');
+    }
+    _notify();
+  }
+
+  /// Called once the pre-existing log has been consumed.
+  void _onReplayDone() {
+    // Anything the process is still waiting on gets the current policy.
+    if (permissionMode == PermissionMode.bypassPermissions) {
+      for (final t in pendingPermissions) {
+        if (!t.isQuestion) respondPermission(t, allow: true);
+      }
+    }
+    _checkAlive();
+    _notify();
+  }
+
+  Future<void> _checkAlive() async {
+    final d = _daemon;
+    if (d == null || !conn.isConnected) return;
+    try {
+      if (await d.isAlive()) return;
+    } catch (_) {
+      return;
+    }
+    final err = (await conn.run('tail -c 2000 ${shq('${d.dir}/err.log')} 2>/dev/null')).trim();
+    final code = (await conn.run('cat ${shq('${d.dir}/exit')} 2>/dev/null')).trim();
+    _daemon = null;
+    _aliveTimer?.cancel();
+    if (code.isNotEmpty && code != '0') {
+      _fail('Claude exited with code $code${err.isEmpty ? '' : ':\n$err'}');
+    } else if (busy) {
+      _fail('Claude process ended unexpectedly${err.isEmpty ? '' : ':\n$err'}');
+    }
+    busy = false;
+    _streamingText = null;
+    await _closeChannels();
+    await d.cleanup();
+    _notify();
+  }
+
+  void _onDetached(String? why) {
+    attached = false;
+    _tail = null;
+    _tailSub = null;
+    _notify();
+  }
+
+  /// Re-attach after the SSH connection came back.
+  Future<void> reattach() async {
+    if (_daemon == null || attached) return;
+    await _attach();
+  }
+
+  Future<void> _closeChannels() async {
+    await _tailSub?.cancel();
+    _tailSub = null;
+    try {
+      _tail?.close();
+    } catch (_) {}
+    _tail = null;
+    try {
+      _writer?.close();
+    } catch (_) {}
+    _writer = null;
+    attached = false;
   }
 
   void _fail(String msg) {
@@ -154,34 +296,26 @@ class ClaudeChat extends ChangeNotifier {
     _notify();
   }
 
-  void _onExit() {
-    final code = _session?.exitCode;
-    _session = null;
+  /// Stop following without killing the process (it keeps working on the
+  /// server; resume the session later to pick it up).
+  Future<void> detach() async {
+    _aliveTimer?.cancel();
+    await _closeChannels();
+    _daemon = null;
     busy = false;
-    final err = _stderrBuf.toString().trim();
-    if (code != null && code != 0) {
-      _fail('Claude exited with code $code${err.isEmpty ? '' : ':\n$err'}');
-    } else if (err.isNotEmpty && items.isEmpty) {
-      items.add(SystemNoteItem(err));
-    }
-    _streamingText?.streaming = false;
     _streamingText = null;
     _notify();
   }
 
+  /// Kill the process on the server.
   Future<void> stop() async {
-    final s = _session;
-    _session = null;
-    await _stdoutSub?.cancel();
-    await _stderrSub?.cancel();
-    _stdoutSub = null;
-    _stderrSub = null;
-    if (s != null) {
+    _aliveTimer?.cancel();
+    final d = _daemon;
+    _daemon = null;
+    await _closeChannels();
+    if (d != null) {
       try {
-        s.close();
-        // Wait for the process to exit so its final transcript writes land
-        // before callers touch the session file (e.g. delete it).
-        await s.done.timeout(const Duration(seconds: 5));
+        await d.kill();
       } catch (_) {}
     }
     busy = false;
@@ -189,20 +323,36 @@ class ClaudeChat extends ChangeNotifier {
     _notify();
   }
 
-  void _write(Map<String, dynamic> obj) {
-    final s = _session;
-    if (s == null) return;
-    s.write(Uint8List.fromList(utf8.encode('${jsonEncode(obj)}\n')));
+  Future<void> _write(Map<String, dynamic> obj) async {
+    if (replaying) return; // never answer the past
+    final d = _daemon;
+    if (d == null) return;
+    var w = _writer;
+    if (w == null) {
+      try {
+        w = await d.writer();
+        _writer = w;
+        w.done.then((_) {
+          if (identical(_writer, w)) _writer = null;
+        });
+      } catch (e) {
+        _fail('Cannot reach Claude: $e');
+        return;
+      }
+    }
+    w.write(Uint8List.fromList(utf8.encode('${jsonEncode(obj)}\n')));
   }
 
   Future<void> send(String text) async {
     if (text.trim().isEmpty) return;
     if (!isRunning) await start(resumeSessionId: sessionId);
     if (!isRunning) return;
-    items.add(UserItem(text));
+    if (!attached) await reattach();
+    // The message comes back through the log (tee), which adds the bubble;
+    // flip busy now so the UI reacts immediately.
     busy = true;
     _notify();
-    _write({
+    await _write({
       'type': 'user',
       'message': {'role': 'user', 'content': text},
     });
@@ -386,10 +536,20 @@ class ClaudeChat extends ChangeNotifier {
       case 'user':
         _onUser(o['message'] as Map<String, dynamic>? ?? {}, parent: o['parent_tool_use_id'] as String?);
       case 'control_request':
-        _onControlRequest(o);
+        if (_isOurs(o)) {
+          _onOwnControlRequest(o);
+        } else {
+          _onControlRequest(o);
+        }
       case 'control_response':
         final r = (o['response'] as Map?)?.cast<String, dynamic>() ?? {};
-        _pendingControl[r['request_id']]?.complete(r);
+        final id = r['request_id'];
+        final c = _pendingControl[id];
+        if (c != null) {
+          c.complete(r);
+        } else {
+          _onOwnPermissionAnswer(r);
+        }
       case 'result':
         _onResult(o);
       default:
@@ -398,17 +558,61 @@ class ClaudeChat extends ChangeNotifier {
     _notify();
   }
 
+  /// Lines we wrote ourselves (they pass through the log via tee).
+  static bool _isOurs(Map<String, dynamic> o) {
+    final sub = (o['request'] as Map?)?['subtype'];
+    return sub == 'interrupt' || sub == 'set_permission_mode' || sub == 'set_model';
+  }
+
+  /// Replaying our own mode/model switches restores the state they set.
+  void _onOwnControlRequest(Map<String, dynamic> o) {
+    if (!replaying) return;
+    final req = (o['request'] as Map?)?.cast<String, dynamic>() ?? {};
+    switch (req['subtype']) {
+      case 'set_permission_mode':
+        final m = PermissionMode.values.where((x) => x.cliValue == req['mode']).firstOrNull;
+        if (m != null) permissionMode = m;
+      case 'set_model':
+        modelOverride = req['model'] as String?;
+    }
+  }
+
+  /// A replayed answer we gave to a permission request.
+  void _onOwnPermissionAnswer(Map<String, dynamic> r) {
+    final id = r['request_id'];
+    for (final t in pendingPermissions) {
+      if (t.pendingPermission!.requestId == id) {
+        final behavior = (r['response'] as Map?)?['behavior'];
+        t.pendingPermission = null;
+        t.permissionDecision = behavior == 'allow' ? 'allow' : 'deny';
+      }
+    }
+  }
+
   void _onSystem(Map<String, dynamic> o) {
     if (o['subtype'] == 'init') {
-      sessionId = o['session_id'] as String? ?? sessionId;
+      final sid = o['session_id'] as String?;
+      if (sid != null && sid != sessionId) {
+        sessionId = sid;
+        _daemon?.setSession(sid).catchError((_) {});
+      } else if (sid != null && replaying) {
+        sessionId = sid;
+      } else if (sid != null) {
+        _daemon?.setSession(sid).catchError((_) {});
+      }
       model = o['model'] as String?;
       final sc = o['slash_commands'];
       if (sc is List) cliSlashCommands = sc.whereType<String>().toList();
-      // --dangerously-skip-permissions makes the CLI start in bypass; the
-      // app's chosen mode is the truth, so put the CLI back to it.
       final pm = o['permissionMode'] as String?;
-      if (pm != null && pm != permissionMode.cliValue) {
-        _control({'subtype': 'set_permission_mode', 'mode': permissionMode.cliValue});
+      if (pm != null) {
+        if (replaying) {
+          // The log knows better than a fresh app what mode the process is in.
+          permissionMode = PermissionMode.values.firstWhere((m) => m.cliValue == pm, orElse: () => permissionMode);
+        } else if (pm != permissionMode.cliValue) {
+          // --dangerously-skip-permissions makes the CLI start in bypass; the
+          // app's chosen mode is the truth, so put the CLI back to it.
+          _control({'subtype': 'set_permission_mode', 'mode': permissionMode.cliValue});
+        }
       }
     }
   }
@@ -484,6 +688,14 @@ class ClaudeChat extends ChangeNotifier {
 
   void _onUser(Map<String, dynamic> msg, {String? parent}) {
     final content = msg['content'];
+    if (content is String) {
+      // Our own prompt, echoed through the log.
+      if (parent == null) {
+        items.add(UserItem(content));
+        busy = true;
+      }
+      return;
+    }
     if (content is! List) return;
     for (final raw in content) {
       final b = ContentBlock.fromJson((raw as Map).cast<String, dynamic>());
@@ -537,7 +749,7 @@ class ClaudeChat extends ChangeNotifier {
       _toolCalls[item.call.id] = item;
       items.add(item);
     }
-    if (permissionMode == PermissionMode.bypassPermissions && !item.isQuestion) {
+    if (permissionMode == PermissionMode.bypassPermissions && !item.isQuestion && !replaying) {
       item.pendingPermission = pr;
       respondPermission(item, allow: true);
       return;
@@ -547,6 +759,7 @@ class ClaudeChat extends ChangeNotifier {
 
   void _onResult(Map<String, dynamic> o) {
     busy = false;
+    if (!replaying) Future.delayed(const Duration(seconds: 2), _checkAlive);
     _streamingText?.streaming = false;
     _streamingText = null;
     sessionId = o['session_id'] as String? ?? sessionId;
@@ -578,7 +791,8 @@ class ClaudeChat extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    stop();
+    _aliveTimer?.cancel();
+    _closeChannels();
     super.dispose();
   }
 }

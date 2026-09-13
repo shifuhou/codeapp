@@ -62,6 +62,21 @@ class SshConnection extends ChangeNotifier {
   String? error;
 
   bool get isConnected => _client != null && !_closed;
+
+  // Kept so the same connection object can reconnect after a drop (phones
+  // lose the socket whenever the screen locks).
+  AuthPrompts? _prompts;
+  String? _knownFingerprint;
+  void Function(String fingerprint)? _onTrustHostKey;
+  bool get canReconnect => _prompts != null;
+
+  /// Re-establishes the socket with the same credentials. Sessions and
+  /// SFTP handles from before are gone; callers re-open what they need.
+  Future<void> reconnect() async {
+    final p = _prompts;
+    if (p == null) throw StateError('never connected');
+    await connect(p, knownFingerprint: _knownFingerprint, onTrustHostKey: _onTrustHostKey!);
+  }
   SSHClient get client {
     final c = _client;
     if (c == null || _closed) throw StateError('SSH not connected');
@@ -144,6 +159,16 @@ class SshConnection extends ChangeNotifier {
     required String? knownFingerprint,
     required void Function(String fingerprint) onTrustHostKey,
   }) async {
+    _prompts = prompts;
+    _knownFingerprint = knownFingerprint;
+    _onTrustHostKey = onTrustHostKey;
+    try {
+      _client?.close();
+    } catch (_) {}
+    _client = null;
+    _sftp = null;
+    _closed = false;
+    error = null;
     final identities = await _loadKeys(prompts);
     final socket = await SSHSocket.connect(
       host.host,

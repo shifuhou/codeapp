@@ -145,7 +145,10 @@ class EditorState extends ChangeNotifier {
     if (f != null) await save(f);
   }
 
-  void close(WorkspaceTab tab) {
+  /// Closes a tab. For a Claude tab, [keepRunning] leaves the process on
+  /// the server (resume the session later to pick it up); otherwise the
+  /// process is stopped.
+  void close(WorkspaceTab tab, {bool keepRunning = false}) {
     final i = tabs.indexOf(tab);
     if (i < 0) return;
     tabs.removeAt(i);
@@ -155,7 +158,11 @@ class EditorState extends ChangeNotifier {
         t.file.controller.dispose();
       case ClaudeTab t:
         t.chat.removeListener(notifyListeners);
-        t.chat.dispose();
+        if (keepRunning) {
+          t.chat.detach().then((_) => t.chat.dispose());
+        } else {
+          t.chat.stop().then((_) => t.chat.dispose());
+        }
       case ShellTab t:
         final chat = t.linkedChat;
         if (chat != null && t.resumeId != null && chats.contains(chat)) {
@@ -180,6 +187,7 @@ class EditorState extends ChangeNotifier {
         case FileTab f:
           f.file.controller.dispose();
         case ClaudeTab c:
+          // Leaving the workspace keeps processes running on the server.
           c.chat.dispose();
         case ShellTab():
           break;

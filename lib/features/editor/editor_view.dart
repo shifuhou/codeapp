@@ -220,18 +220,22 @@ class _TabStrip extends StatelessWidget {
     }
     if (tab is ClaudeTab && tab.chat.busy) {
       if (!context.mounted) return;
-      final ok = await showDialog<bool>(
+      final choice = await showDialog<String>(
         context: context,
         builder: (c) => AlertDialog(
           title: const Text('Claude is still working'),
-          content: const Text('Closing the tab stops the current turn. The session can be resumed later.'),
+          content: const Text('It runs on the server, so it can keep going after this tab closes. '
+              'Resume the session later to see the result.'),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Close')),
+            TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.pop(c, 'stop'), child: const Text('Stop it')),
+            FilledButton(onPressed: () => Navigator.pop(c, 'keep'), child: const Text('Keep running')),
           ],
         ),
       );
-      if (ok != true) return;
+      if (choice == null) return;
+      editor.close(tab, keepRunning: choice == 'keep');
+      return;
     }
     editor.close(tab);
   }
